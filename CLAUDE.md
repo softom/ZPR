@@ -31,7 +31,7 @@ This file provides guidance to Claude Code when working in this repository.
 | `meeting_processor.py` | Генерация задач из транскрипции собрания | `python meeting_processor.py "ПОДРЯДЧИКИ/МЛА+/Собрания/2026-04-17 ..."` |
 | `protocol_generator.py` | Генерация протокола .docx из MD-задач | `python protocol_generator.py "ПОДРЯДЧИКИ/Бюро82/Собрания/2026-04-17 ..."` |
 | `report_generator.py` | Еженедельный отчёт по всем объектам | `python report_generator.py [--date YYYY-MM-DD] [--dry-run]` |
-| `document_processor.py` | Загрузка документа в хранилище + Pinecone | *(в разработке)* |
+| `document_processor.py` | Загрузка документа в хранилище + pgvector | *(в разработке)* |
 
 ---
 
@@ -44,6 +44,63 @@ LLM_MODEL: anthropic/claude-sonnet-4.6
 LLM_PROVIDER: polza
 POLZA_BASE_URL: https://polza.ai/api/v1
 ```
+
+---
+
+## Локальный стенд (разработка)
+
+**Запуск БД и сервисов:** `supabase start` в корне репозитория (требует Docker Desktop).
+
+### Компоненты
+
+| Слой | Инструмент | Назначение |
+|------|-----------|------------|
+| Контейнеризация | Docker Desktop | Движок для контейнеров Supabase |
+| БД-стек | Supabase CLI (`supabase.exe`) | Оркестрация локального Supabase |
+| Бэкенд-скрипты | Anaconda (Python 3.13, conda env `zpr`) | Скрипты `*.py` этого репозитория |
+| UI | Node.js 24 LTS + Next.js | Веб-интерфейс (папка `ui/`) |
+| Python-клиент Supabase | `supabase-py` | Доступ из скриптов к локальной/прод БД |
+| JS-клиент Supabase | `@supabase/supabase-js` | Доступ из Next.js к той же БД |
+
+### Структура репозитория
+
+```
+D:\CODE\zpr_code\
+├─ config.py              # ключи (в .gitignore)
+├─ *.py                   # бэкенд-скрипты ЗПР (Python, conda env `zpr`)
+├─ requirements.txt       # Python-зависимости (включая supabase, python-dotenv)
+├─ supabase\              # конфиг Local Dev (в git)
+│  ├─ config.toml
+│  └─ migrations\         # schema-миграции (источник истины для таблиц)
+├─ ui\                    # Next.js интерфейс (App Router + TS + Tailwind)
+│  ├─ .env.local          # URL/ключи (в .gitignore)
+│  └─ src\                # страницы, компоненты, supabase-клиент
+└─ MD WIKI\               # база знаний (не в git)
+```
+
+### Порты локального стека
+
+| Порт | Сервис | URL |
+|------|--------|-----|
+| 54321 | Kong API gateway | http://127.0.0.1:54321 — REST/Realtime/Auth/Storage |
+| 54322 | PostgreSQL | `postgresql://postgres:postgres@127.0.0.1:54322/postgres` |
+| 54323 | Supabase Studio | http://127.0.0.1:54323 — веб-админка, SQL-редактор, логи |
+| 54324 | Inbucket | http://127.0.0.1:54324 — тестовый SMTP для писем Auth |
+
+Python-скрипты и Next.js ходят **в одну БД** через Kong (порт 54321).
+Ключи (`anon`, `service_role`) CLI выводит после `supabase start` — сохраняются в `config.py` и `ui/.env.local`.
+
+### Схема БД — источник истины
+
+Миграции в `supabase/migrations/*.sql`. Применяются командой `supabase db reset` (пересобирает локальную БД).
+Описание таблиц и ролей — `MD WIKI/CLAUDE/06_БАЗА_ДАННЫХ.md`.
+
+### Миграция на другую машину / в прод
+
+1. `git clone` репозитория
+2. `supabase start` — поднимает идентичный стек
+3. `supabase db reset` — применяет все миграции
+4. Для прод-Supabase (облако): `supabase link --project-ref <ref>` + `supabase db push`
 
 ---
 
@@ -90,7 +147,7 @@ Obsidian (`D:\Dropbox\Obsidian\Tigra\ЗПР\`) — хранилище отчёт
 | `CLAUDE/03_ПРОГРАММНЫЙ_КОД.md` | Репозиторий, скрипты, git |
 | `CLAUDE/04_MD_WIKI.md` | MD WIKI — база знаний, инструкция для Claude |
 | `CLAUDE/05_OBSIDIAN.md` | Obsidian — отчётные формы в Dropbox |
-| `CLAUDE/06_БАЗА_ДАННЫХ.md` | Supabase: схема, роли, Pinecone |
+| `CLAUDE/06_БАЗА_ДАННЫХ.md` | Supabase: схема, роли, pgvector |
 | `CLAUDE/07_Генерация_задач_и_кодировка.md` | Генерация задач из протоколов |
 | `CLAUDE/08_Синхронизация_договоров.md` | Синхронизация договоров из Bitrix24 |
 | `CLAUDE/09_Промпт_привязка_цитат.md` | Промпт для привязки цитат к задачам |

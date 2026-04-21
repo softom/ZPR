@@ -2,6 +2,18 @@
 -- ZPR — начальная схема БД
 -- ============================================================
 
+-- Сброс (для повторного применения)
+drop table if exists contract_milestones cascade;
+drop table if exists documents          cascade;
+drop table if exists letters            cascade;
+drop table if exists folders            cascade;
+drop table if exists objects            cascade;
+drop type  if exists doc_type           cascade;
+drop type  if exists doc_method         cascade;
+drop type  if exists direction_type     cascade;
+drop type  if exists storage_type       cascade;
+drop type  if exists entity_type        cascade;
+
 -- Enums
 
 create type entity_type as enum ('object', 'contractor', 'customer');
@@ -34,7 +46,7 @@ create type doc_type as enum (
 -- ============================================================
 create table objects (
     id           uuid primary key default gen_random_uuid(),
-    code         text not null unique,           -- '006'
+    code         text not null unique,           -- '006_ГОСТИНИЦА_400' (NNN_ТИП_ЁМКОСТЬ)
     current_name text not null,                  -- 'Отель 5★ Health'
     contractor   text,                           -- 'ХГ'
     aliases      jsonb not null default '[]',    -- ['04_HLT_260', 'Хелс']

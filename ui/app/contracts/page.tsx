@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { useRole } from '@/lib/useRole'
 import ObjectModal from '@/components/ObjectModal'
 
 type ObjectRow = { code: string; current_name: string; contractor: string | null }
@@ -10,6 +11,7 @@ const METHODS = ['Электронная_почта', 'ЭДО', 'Курьер', 
 const CONTRACT_TYPES = ['Договор', 'ДС', 'Акт']
 
 export default function ContractsPage() {
+  const { isAdmin } = useRole()
   const [objects, setObjects] = useState<ObjectRow[]>([])
   const [objectModalOpen, setObjectModalOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -195,13 +197,15 @@ export default function ContractsPage() {
         <div>
           <div className="flex items-center justify-between mb-2">
             <label className="text-xs font-medium text-gray-600">Объекты</label>
-            <button
-              type="button"
-              onClick={() => setObjectModalOpen(true)}
-              className="text-xs text-blue-600 hover:underline"
-            >
-              + Создать объект
-            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setObjectModalOpen(true)}
+                className="text-xs text-blue-600 hover:underline"
+              >
+                + Создать объект
+              </button>
+            )}
           </div>
           {objects.length === 0 ? (
             <p className="text-sm text-gray-400">Нет объектов. Создайте первый.</p>
