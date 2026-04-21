@@ -124,34 +124,40 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
       fd.append('objects', JSON.stringify(objects))
 
       const res = await fetch('/api/contracts/analyze', { method: 'POST', body: fd })
-      const data = await res.json()
-
-      if (data.error) throw new Error(data.error)
+      let data: Record<string, unknown>
+      try {
+        data = await res.json()
+      } catch {
+        throw new Error(`Сервер вернул неожиданный ответ (${res.status} ${res.statusText})`)
+      }
+      if (data.error) throw new Error(data.error as string)
 
       // Build object URLs for PDF preview
       const urls = files.map(f => URL.createObjectURL(f))
       setFileUrls(urls)
       setActiveFile(0)
 
+      const d = data as Record<string, string | string[]>
+
       // Keep raw text for re-read
-      setExtractedText(data._text ?? '')
+      setExtractedText((d._text as string) ?? '')
 
       // Fill metadata
       setMeta({
-        date:          data.date ?? '',
-        direction:     data.direction ?? 'incoming',
-        from_to:       data.from_to ?? '',
-        method:        data.method ?? 'Скан',
-        contract_type: data.contract_type ?? 'Договор',
-        version:       data.version ?? 'v1',
-        title:         data.title ?? '',
-        object_codes:  data.object_codes ?? [],
-        parties:       data.parties ?? '',
-        subject:       data.subject ?? '',
-        amount:        data.amount ?? '',
+        date:          (d.date as string)          ?? '',
+        direction:     (d.direction as string)     ?? 'incoming',
+        from_to:       (d.from_to as string)       ?? '',
+        method:        (d.method as string)        ?? 'Скан',
+        contract_type: (d.contract_type as string) ?? 'Договор',
+        version:       (d.version as string)       ?? 'v1',
+        title:         (d.title as string)         ?? '',
+        object_codes:  (d.object_codes as string[]) ?? [],
+        parties:       (d.parties as string)       ?? '',
+        subject:       (d.subject as string)       ?? '',
+        amount:        (d.amount as string)        ?? '',
       })
 
-      setMilestones(data.milestones ?? [])
+      setMilestones((data.milestones as Milestone[]) ?? [])
       setStep('metadata')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Ошибка анализа')

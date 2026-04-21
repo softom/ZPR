@@ -5,36 +5,54 @@ const POLZA_API_KEY  = process.env.POLZA_API_KEY ?? ''
 const LLM_MODEL      = process.env.LLM_MODEL ?? 'anthropic/claude-sonnet-4-6'
 
 export async function POST(request: NextRequest) {
-  const formData = await request.formData()
-  const files = formData.getAll('files') as File[]
-  const objectsJson = formData.get('objects') as string ?? '[]'
+  try {
+    const formData = await request.formData()
+    const files = formData.getAll('files') as File[]
+    const objectsJson = (formData.get('objects') as string) ?? '[]'
 
-  if (!files.length) {
-    return NextResponse.json({ error: 'Нет файлов' }, { status: 400 })
-  }
-
-  // Extract text from each PDF
-  const extractedTexts: string[] = []
-  for (const file of files) {
-    const buffer = Buffer.from(await file.arrayBuffer())
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParse = require('pdf-parse')
-      const data = await pdfParse(buffer)
-      extractedTexts.push(`=== ${file.name} ===\n${data.text}`)
-    } catch {
-      extractedTexts.push(`=== ${file.name} ===\n[Не удалось извлечь текст — возможно скан. Пожалуйста заполните поля вручную.]`)
+    if (!files.length) {
+      return NextResponse.json({ error: 'Нет файлов' }, { status: 400 })
     }
+
+    // Extract text from each PDF
+    const extractedTexts: string[] = []
+    for (const file of files) {
+      const buffer = Buffer.from(await file.arrayBuffer())
+      const text = await extractPdfText(buffer, file.name)
+      extractedTexts.push(`=== ${file.name} ===\n${text}`)
+    }
+
+    const combinedText = extractedTexts.join('\n\n')
+    const objects: Array<{ code: string }> = JSON.parse(objectsJson)
+    const objectCodes = objects.map(o => o.code).join(', ')
+
+    const prompt = buildPrompt(combinedText, objectCodes)
+    const result = await callLLM(prompt)
+
+    // Attach extracted text for re-read step
+    result._text = combinedText
+
+    return NextResponse.json(result)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error('[analyze]', message)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
+}
 
-  const combinedText = extractedTexts.join('\n\n')
-  const objects: Array<{ code: string }> = JSON.parse(objectsJson)
-  const objectCodes = objects.map(o => o.code).join(', ')
-
-  const prompt = buildPrompt(combinedText, objectCodes)
-  const result = await callLLM(prompt)
-
-  return NextResponse.json(result)
+async function extractPdfText(buffer: Buffer, filename: string): Promise<string> {
+  try {
+    // Dynamic import avoids pdf-parse loading test PDF at module init time
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pdfParse = require('pdf-parse/lib/pdf-parse.js')
+    const data = await pdfParse(buffer)
+    const text = (data.text as string).trim()
+    if (!text) return '[PDF не содержит извлекаемого текста — возможно скан]'
+    return text
+  } catch (e) {
+    console.warn('[pdf-parse]', filename, e)
+    return '[Не удалось извлечь текст — заполните поля вручную]'
+  }
 }
 
 function buildPrompt(text: string, objectCodes: string): string {
