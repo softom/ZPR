@@ -9,3 +9,8 @@ config.py
 
 # Коммерчески чувствительная документация
 MD WIKI/
+
+# Next.js — ключи и сборка
+ui/.env.local
+ui/.next/
+ui/node_modules/
