@@ -49,15 +49,19 @@ export async function POST(request: NextRequest) {
 
 async function extractPdfText(buffer: Buffer, filename: string): Promise<{ text: string; isScan: boolean }> {
   try {
-    // Dynamic import avoids pdf-parse loading test PDF at module init time
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pdfParse = require('pdf-parse/lib/pdf-parse.js')
+    const pdfParse = require('pdf-parse')
     const data = await pdfParse(buffer)
-    const text = (data.text as string).trim()
-    if (!text) return { text: '', isScan: true }
-    return { text, isScan: false }
+    const raw = (data.text as string) ?? ''
+    // Strip whitespace/newlines — if meaningful text remains, it's a text PDF
+    const text = raw.replace(/\s+/g, ' ').trim()
+    if (text.length < 20) {
+      console.warn('[pdf-parse] too little text extracted from', filename, `(${text.length} chars)`)
+      return { text: '', isScan: true }
+    }
+    return { text: raw, isScan: false }
   } catch (e) {
-    console.warn('[pdf-parse]', filename, e)
+    console.warn('[pdf-parse] error on', filename, e)
     return { text: '', isScan: true }
   }
 }
