@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type ObjectRow = { code: string; current_name: string; contractor: string | null }
+type ObjectRow = { code: string; current_name: string; contractor: string | null; aliases: string[] }
 
 type Milestone = {
   milestone_name: string
@@ -34,7 +34,7 @@ const METHODS = ['ЭДО', 'Электронная_почта', 'Курьер', 
 const CONTRACT_TYPES = ['Договор', 'ДС', 'Акт']
 
 const EMPTY_META: Metadata = {
-  date: '', direction: 'incoming', from_to: '', method: 'Скан',
+  date: '', direction: 'outgoing', from_to: '', method: 'ЭДО',
   contract_type: 'Договор', version: 'v1', title: '',
   object_codes: [], parties: '', subject: '', amount: '',
 }
@@ -67,7 +67,7 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
   useEffect(() => {
     if (!open) return
     reset()
-    supabase.from('objects').select('code,current_name,contractor').eq('active', true).order('code').then(({ data }) => {
+    supabase.from('objects').select('code,current_name,contractor,aliases').eq('active', true).order('code').then(({ data }) => {
       setObjects(data ?? [])
     })
   }, [open])
@@ -121,7 +121,12 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
     try {
       const fd = new FormData()
       files.forEach(f => fd.append('files', f))
-      fd.append('objects', JSON.stringify(objects))
+      fd.append('objects', JSON.stringify(objects.map(o => ({
+        code: o.code,
+        current_name: o.current_name,
+        contractor: o.contractor,
+        aliases: o.aliases ?? [],
+      }))))
 
       const res = await fetch('/api/contracts/analyze', { method: 'POST', body: fd })
       let data: Record<string, unknown>
@@ -145,7 +150,7 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
       // Fill metadata
       setMeta({
         date:          (d.date as string)          ?? '',
-        direction:     (d.direction as string)     ?? 'incoming',
+        direction:     (d.direction as string)     ?? 'outgoing',
         from_to:       (d.from_to as string)       ?? '',
         method:        (d.method as string)        ?? 'Скан',
         contract_type: (d.contract_type as string) ?? 'Договор',
@@ -245,7 +250,7 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">
               {step === 'upload'    && 'Новый договор'}
-              {step === 'analyzing' && 'Анализ документов…'}
+              {step === 'analyzing' && 'LLM анализирует документы…'}
               {step === 'metadata'  && 'Проверьте метаданные'}
               {step === 'verify'    && 'Проверка этапов'}
               {step === 'saving'    && 'Сохранение…'}
@@ -277,7 +282,7 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
             >
               <div className="text-3xl mb-2">📄</div>
               <p className="text-sm font-medium text-gray-700">Перетащите PDF или нажмите для выбора</p>
-              <p className="text-xs text-gray-400 mt-1">Несколько файлов — загружайте весь пакет (договор + приложения + ДС)</p>
+              <p className="text-xs text-gray-400 mt-1">Весь пакет: договор + приложения + ДС. Только текстовые PDF — сканы не принимаются.</p>
             </div>
 
             {files.length > 0 && (
@@ -302,7 +307,7 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
                 disabled={!files.length}
                 className="px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-40"
               >
-                Распознать и заполнить
+                Анализировать и заполнить
               </button>
             </div>
           </div>
