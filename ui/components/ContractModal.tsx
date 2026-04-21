@@ -2,6 +2,26 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import * as pdfjsLib from 'pdfjs-dist'
+
+// Use CDN worker to avoid bundling issues
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
+
+async function extractTextFromPdf(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer()
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  const pageTexts: string[] = []
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i)
+    const content = await page.getTextContent()
+    const pageText = content.items
+      .map(item => ('str' in item ? item.str : ''))
+      .join(' ')
+    pageTexts.push(pageText)
+  }
+  return pageTexts.join('\n')
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -119,16 +139,29 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
     setStep('analyzing')
 
     try {
-      const fd = new FormData()
-      files.forEach(f => fd.append('files', f))
-      fd.append('objects', JSON.stringify(objects.map(o => ({
-        code: o.code,
-        current_name: o.current_name,
-        contractor: o.contractor,
-        aliases: o.aliases ?? [],
-      }))))
+      // Extract text client-side — no server bundling issues
+      const texts: Array<{ name: string; text: string }> = []
+      for (const file of files) {
+        const text = await extractTextFromPdf(file)
+        if (!/[a-zA-Zа-яА-ЯёЁ0-9]/.test(text)) {
+          throw new Error(`Файл «${file.name}» является сканом и не содержит извлекаемого текста. Загрузите текстовый PDF.`)
+        }
+        texts.push({ name: file.name, text })
+      }
 
-      const res = await fetch('/api/contracts/analyze', { method: 'POST', body: fd })
+      const res = await fetch('/api/contracts/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          texts,
+          objects: objects.map(o => ({
+            code: o.code,
+            current_name: o.current_name,
+            contractor: o.contractor,
+            aliases: o.aliases ?? [],
+          })),
+        }),
+      })
       let data: Record<string, unknown>
       try {
         data = await res.json()

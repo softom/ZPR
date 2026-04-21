@@ -8,35 +8,18 @@ type ObjectInfo = { code: string; current_name: string; contractor: string | nul
 
 export async function POST(request: NextRequest) {
   try {
-    const formData = await request.formData()
-    const files = formData.getAll('files') as File[]
-    const objectsJson = (formData.get('objects') as string) ?? '[]'
-
-    if (!files.length) {
-      return NextResponse.json({ error: 'Нет файлов' }, { status: 400 })
+    const { texts, objects } = await request.json() as {
+      texts: Array<{ name: string; text: string }>
+      objects: ObjectInfo[]
     }
 
-    // Extract text from each PDF — scan PDFs are rejected
-    const extractedTexts: string[] = []
-    for (const file of files) {
-      const buffer = Buffer.from(await file.arrayBuffer())
-      const { text, isScan } = await extractPdfText(buffer, file.name)
-      if (isScan) {
-        return NextResponse.json(
-          { error: `Файл «${file.name}» является сканом и не содержит извлекаемого текста. Загрузите текстовый PDF.` },
-          { status: 422 }
-        )
-      }
-      extractedTexts.push(`=== ${file.name} ===\n${text}`)
+    if (!texts?.length) {
+      return NextResponse.json({ error: 'Нет текста для анализа' }, { status: 400 })
     }
 
-    const combinedText = extractedTexts.join('\n\n')
-    const objects: ObjectInfo[] = JSON.parse(objectsJson)
-
-    const prompt = buildPrompt(combinedText, objects)
+    const combinedText = texts.map(t => `=== ${t.name} ===\n${t.text}`).join('\n\n')
+    const prompt = buildPrompt(combinedText, objects ?? [])
     const result = await callLLM(prompt)
-
-    // Attach extracted text for re-read step
     result._text = combinedText
 
     return NextResponse.json(result)
@@ -45,28 +28,6 @@ export async function POST(request: NextRequest) {
     console.error('[analyze]', message)
     return NextResponse.json({ error: message }, { status: 500 })
   }
-}
-
-async function extractPdfText(buffer: Buffer, filename: string): Promise<{ text: string; isScan: boolean }> {
-  // Try main pdf-parse first (works after server restart with serverExternalPackages)
-  // Fallback to lib/pdf-parse.js which doesn't load test files (works without restart)
-  const parsers = ['pdf-parse', 'pdf-parse/lib/pdf-parse.js']
-
-  for (const mod of parsers) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParse = require(mod)
-      const data = await pdfParse(buffer)
-      const raw = (data.text as string) ?? ''
-      const hasText = /[a-zA-Zа-яА-ЯёЁ0-9]/.test(raw)
-      if (hasText) return { text: raw, isScan: false }
-      // got result but empty — still try next parser
-    } catch (e) {
-      console.warn(`[pdf-parse] ${mod} failed for ${filename}:`, e)
-    }
-  }
-
-  return { text: '', isScan: true }
 }
 
 function buildObjectsHint(objects: ObjectInfo[]): string {
@@ -99,45 +60,42 @@ function buildPrompt(text: string, objects: ObjectInfo[]): string {
   "incoming" только если ЗПР получает документ от инвестора/заказчика ЗПР.
 
 "from_to" — контрагент (вторая сторона, не ЗПР). Краткое наименование или аббревиатура.
-  Пример: «ООО "Хэдс Групп"» → «ХГ», «МЛА+», «8D Studio» → «8D».
 
 "method" — метод передачи: ЭДО / Электронная_почта / Курьер / Скан / Факс / Лично.
-  Если в тексте упоминается ЭДО или электронный документооборот → "ЭДО".
-  По умолчанию "ЭДО".
+  Если упоминается ЭДО или электронный документооборот → "ЭДО". По умолчанию "ЭДО".
 
 "contract_type" — тип: "Договор" / "ДС" / "Акт".
 
-"version" — версия: "v1" для первичного договора, "ДС1"/"ДС2"/... для доп. соглашений.
+"version" — "v1" для первичного договора, "ДС1"/"ДС2"/... для доп. соглашений.
 
-"title" — краткое название до 60 символов. Пример: «Договор ХГ-2026-003» или «ДС-1 к договору ХГ-2026-003».
+"title" — краткое название до 60 символов. Пример: «Договор ХГ-2026-003».
 
 "parties" — стороны через «↔». Пример: «ЗПР ↔ ХГ».
 
-"subject" — предмет договора, одно предложение. Что именно делает подрядчик.
+"subject" — предмет договора, одно предложение.
 
 "amount" — итоговая сумма с валютой. Пример: «1 250 000 ₽». Пустая строка если не указана.
 
-"object_codes" — массив кодов объектов из договора.
-  Сопоставляй с таблицей объектов по: коду, названию, псевдониму, номеру участка.
+"object_codes" — массив кодов объектов. Сопоставляй с таблицей по коду, названию, псевдониму.
   Таблица объектов:
 ${objectsHint}
-  Верни только коды из таблицы (например ["006_ГОСТИНИЦА_400"]). Пустой массив если не нашёл.
+  Верни только коды из таблицы. Пустой массив если не нашёл.
 
-"milestones" — массив этапов и сроков. Искать в приоритете:
-  1. «План работ» / «Календарный план» в последнем ДС (если есть ДС — берём только оттуда)
-  2. Приложение №3 «Календарный план» основного договора
+"milestones" — массив этапов. Искать в приоритете:
+  1. «План работ» в последнем ДС
+  2. Приложение №3 «Календарный план»
   3. Приложение №1 ТЗ, раздел «Этапы»
-  4. Раздел «Сроки выполнения работ» (общие даты начала/окончания)
+  4. Раздел «Сроки выполнения работ»
+  Если ДС есть — берём только его этапы.
 
   Каждый этап:
-  - "milestone_name": название этапа из документа
-  - "due_date": дата окончания этапа (YYYY-MM-DD). Форматы в тексте: ДД.ММ.ГГГГ, «до 31.10.2025», «31 октября 2025 г.»
-  - "responsible": исполнитель (обычно подрядчик, та же сторона что "from_to")
+  - "milestone_name": название этапа
+  - "due_date": дата окончания (YYYY-MM-DD). Форматы: ДД.ММ.ГГГГ, «до 31.10.2025», «31 октября 2025 г.»
+  - "responsible": исполнитель
   - "source": источник — «ДС-1», «Приложение №3», «Раздел 4» и т.п.
 
-  Важно: в PDF таблицы часто читаются построчно, колонки перемешаны.
-  Паттерн строки таблицы: ЭТАП → название → дата начала → дата окончания.
-  due_date = вторая дата (дата окончания). Опечатки в году (2626→2026) исправляй по контексту.
+  В PDF таблицы читаются построчно. Паттерн: ЭТАП → название → дата начала → дата окончания.
+  due_date = вторая дата. Опечатки в году (2626→2026) исправляй по контексту.
 
 Текст документов:
 ${truncated}`
@@ -165,7 +123,6 @@ async function callLLM(prompt: string) {
   const data = await response.json()
   const content: string = data.choices?.[0]?.message?.content ?? '{}'
 
-  // Extract JSON from response (might be wrapped in ```json ... ```)
   const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) ?? content.match(/(\{[\s\S]*\})/)
   const jsonStr = jsonMatch ? (jsonMatch[1] ?? jsonMatch[0]) : content
 
