@@ -8,6 +8,7 @@ const supabaseAdmin = createClient(
 
 type Milestone = {
   milestone_name: string
+  date_start: string
   due_date: string
   responsible: string
   source: string
@@ -72,6 +73,7 @@ export async function POST(request: NextRequest) {
             document_id: doc.id,
             object_code: code,
             milestone_name: m.milestone_name,
+            date_start: m.date_start || null,
             due_date: m.due_date || null,
             responsible: m.responsible || null,
             source: m.source || null,
@@ -80,6 +82,7 @@ export async function POST(request: NextRequest) {
             document_id: doc.id,
             object_code: '',
             milestone_name: m.milestone_name,
+            date_start: m.date_start || null,
             due_date: m.due_date || null,
             responsible: m.responsible || null,
             source: m.source || null,

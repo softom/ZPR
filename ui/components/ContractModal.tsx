@@ -28,6 +28,7 @@ type ObjectRow = { code: string; current_name: string; contractor: string | null
 
 type Milestone = {
   milestone_name: string
+  date_start: string
   due_date: string
   responsible: string
   source: string
@@ -251,7 +252,7 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
   }
 
   function addMilestone() {
-    setMilestones(prev => [...prev, { milestone_name: '', due_date: '', responsible: '', source: '' }])
+    setMilestones(prev => [...prev, { milestone_name: '', date_start: '', due_date: '', responsible: '', source: '' }])
   }
 
   function removeMilestone(i: number) {
@@ -532,9 +533,15 @@ export default function ContractModal({ open, onClose, onCreated }: Props) {
                               className="flex-1 border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
                             <button onClick={() => removeMilestone(i)} className="text-gray-300 hover:text-red-400 px-1">×</button>
                           </div>
-                          <div className="grid grid-cols-3 gap-2">
+                          <div className="grid grid-cols-4 gap-2">
                             <div>
-                              <span className="block text-gray-400 mb-0.5">Срок</span>
+                              <span className="block text-gray-400 mb-0.5">Начало</span>
+                              <input type="date" value={m.date_start ?? ''}
+                                onChange={e => updateMilestone(i, 'date_start', e.target.value)}
+                                className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                            </div>
+                            <div>
+                              <span className="block text-gray-400 mb-0.5">Окончание</span>
                               <input type="date" value={m.due_date}
                                 onChange={e => updateMilestone(i, 'due_date', e.target.value)}
                                 className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
