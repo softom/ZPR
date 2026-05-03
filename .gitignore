@@ -14,3 +14,7 @@ MD WIKI/
 ui/.env.local
 ui/.next/
 ui/node_modules/
+
+# Локальные конфиги инструментов (специфичны для машины)
+.claude/
+.obsidian/
