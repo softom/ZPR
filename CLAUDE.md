@@ -124,12 +124,27 @@ Python-скрипты и Next.js ходят **в одну БД** через Kong
 
 **Если Docker не запущен / скрипт падает** — Claude немедленно сообщает пользователю с точной командой. **НЕ продолжает** писать зависимый код — он сломается в runtime с невнятным «Ошибка поиска в БД».
 
+### Чувствительные бизнес-данные — `business_data.yaml`
+
+Реальные ИНН/адреса/подписанты юр.лиц и маппинг подрядчик→объекты вынесены из миграций в `business_data.yaml` (в `.gitignore`, синхронизируется через Dropbox). Шаблон в репо — `business_data.example.yaml`.
+
+Применение к БД:
+
+```bash
+python seed_business_data.py        # INSERT в legal_entities + backfill tasks.assignee_entity_id
+python seed_business_data.py --dry  # показать SQL без записи
+```
+
+Используется также `tasks_importer.py` — нормализация имён организаций при импорте задач из .md.
+
 ### Миграция на другую машину / в прод
 
 1. `git clone` репозитория
-2. `supabase start` — поднимает идентичный стек
-3. `.\scripts\db-migrate.ps1` — применяет все миграции с учётом `_applied_migrations`
-4. Для прод-Supabase (облако): `supabase link --project-ref <ref>` + `supabase db push`
+2. Скопировать секреты из Dropbox: `config.py`, `ui/.env.local`, `business_data.yaml`
+3. `supabase start` — поднимает идентичный стек
+4. `.\scripts\db-migrate.ps1` — применяет все миграции с учётом `_applied_migrations`
+5. `python seed_business_data.py` — заливает чувствительные seed-данные из yaml
+6. Для прод-Supabase (облако): `supabase link --project-ref <ref>` + `supabase db push`
 
 ---
 
