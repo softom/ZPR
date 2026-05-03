@@ -18,3 +18,10 @@ ui/node_modules/
 # Локальные конфиги инструментов (специфичны для машины)
 .claude/
 .obsidian/
+
+# Sensitive business data — sensitive ИНН, адреса, маппинг подрядчик→объекты.
+# Шаблон: business_data.example.yaml (в git). Реальные данные — в Dropbox.
+business_data.yaml
+
+# Snippets — копии запросов из Supabase Studio, дублируют миграции
+supabase/snippets/
