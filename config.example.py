@@ -5,7 +5,8 @@ config.example.py — шаблон конфигурации.
 
 from pathlib import Path
 
-BASE_DIR = Path(r"D:\Dropbox\Obsidian\Tigra\ЗПР")  # путь к Obsidian-хранилищу
+BASE_DIR     = Path(r"D:\Dropbox\Obsidian\Tigra\ЗПР")  # путь к Obsidian-хранилищу
+STORAGE_DIR  = Path(r"D:\ЗПР_Хранилище")              # первичное хранилище документов
 
 SOURCE_DIRS_CONTRACTS = [
     BASE_DIR / "ОБЪЕКТЫ",
@@ -24,9 +25,16 @@ SCHEDULE_DIR    = BASE_DIR / "ГРАФИК"
 FINECMD_PATH = r"C:\Program Files (x86)\ABBYY FineReader 15\FineCmd.exe"
 ABBYY_LANG   = "Russian,English"
 
-POLZA_API_KEY  = ""   # https://polza.ai/dashboard/api-keys
-POLZA_BASE_URL = "https://polza.ai/api/v1"
+POLZA_API_KEY    = ""   # https://polza.ai/dashboard/api-keys
+POLZA_BASE_URL   = "https://polza.ai/api/v1"
+LLM_MODEL        = "anthropic/claude-sonnet-4.6"
+EMBEDDING_MODEL  = "openai/text-embedding-3-small"  # для векторного поиска
 
-PINECONE_API_KEY   = ""         # https://app.pinecone.io/
-PINECONE_INDEX     = "zpr-docs"
-PINECONE_NAMESPACE = "zpr"
+# ─── Supabase (локальный Docker-стек) ────────────────────────────────────────
+# Векторный поиск — через pgvector, расширение уже установлено в Supabase.
+# После `supabase start` CLI показывает актуальные URL и ключи (`supabase status`).
+
+SUPABASE_URL              = "http://127.0.0.1:54321"
+SUPABASE_PUBLISHABLE_KEY  = ""   # клиентский ключ (Next.js, браузер) — безопасен
+SUPABASE_SECRET_KEY       = ""   # серверный ключ (Python-скрипты) — НИКОГДА не в git
+SUPABASE_DB_URL           = "postgresql://postgres:postgres@127.0.0.1:54322/postgres"

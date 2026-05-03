@@ -85,6 +85,24 @@ def ask_llm_json(prompt: str, system: str = "", model: str = None, max_tokens: i
         return None
 
 
+def get_embedding(text: str, model: str = None) -> list[float] | None:
+    """
+    Возвращает вектор-эмбеддинг текста (1536-мерный для text-embedding-3-small).
+    Возвращает None при ошибке.
+    """
+    from config import EMBEDDING_MODEL
+    client = _get_client()
+    try:
+        response = client.embeddings.create(
+            model=model or EMBEDDING_MODEL,
+            input=text[:8000],
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        print(f"  [EMB] ошибка: {e}")
+        return None
+
+
 # ─── Специализированные функции для ЗПР ──────────────────────────────────────
 
 STAGES_SYSTEM = """Ты — ассистент, извлекающий этапы договора из текста.
