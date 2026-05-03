@@ -24,3 +24,117 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ─── Печать ───────────────────────────────────────────────────────────────
+   Убираем overflow и фиксированные высоты с layout-контейнеров,
+   чтобы контент целиком вышел в поток печати.
+   Скрываем сайдбар и интерактивные кнопки.
+*/
+@media print {
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+    background: white !important;
+  }
+
+  body {
+    display: block !important;
+  }
+
+  main {
+    overflow: visible !important;
+    height: auto !important;
+    padding: 0 !important;
+    flex: none !important;
+  }
+
+  /* Сайдбар не нужен при печати */
+  aside {
+    display: none !important;
+  }
+
+  /* Скрываем кнопки/ссылки управления (Сформировать резюме, фильтры, переключатели) */
+  .no-print,
+  button {
+    display: none !important;
+  }
+
+  /* Не разрывать карточки и таблицы между страницами без необходимости */
+  .print-keep,
+  table,
+  tr,
+  .bg-white {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Уберём тени и рамки на печать — экономим тонер */
+  * {
+    box-shadow: none !important;
+  }
+
+  /* Ссылки — без подчёркивания и без URL после текста */
+  a {
+    color: inherit !important;
+    text-decoration: none !important;
+  }
+
+  /* Размер страницы и поля */
+  @page {
+    size: A4;
+    margin: 12mm 10mm;
+  }
+
+  /* ─── Отчёт по объектам: 1 объект = 1 лист A4 ───────────────────── */
+
+  .object-report {
+    display: block !important;
+    width: 100% !important;
+    box-sizing: border-box;
+    border: 1px solid #d1d5db !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+    padding: 6mm !important;
+    page-break-after: always;
+    break-after: page;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  .object-report:last-of-type {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  /* Шапка объекта */
+  .object-report h2 {
+    font-size: 16pt;
+    margin-bottom: 4mm;
+  }
+
+  .object-report h3 {
+    font-size: 11pt;
+  }
+
+  /* Содержимое */
+  .object-report .text-sm {
+    font-size: 10pt;
+    line-height: 1.4;
+  }
+
+  /* details раскрыты при печати */
+  .object-report details {
+    open: true;
+  }
+  .object-report details > summary {
+    display: none;
+  }
+  .object-report details > * {
+    display: block !important;
+  }
+
+  /* legacy селекторы — на случай если что-то осталось */
+  .stats-cards-grid { display: block !important; }
+  .stats-card { display: block !important; page-break-inside: avoid; break-inside: avoid; }
+  .stats-overview, .no-print { display: none !important; }
+}
