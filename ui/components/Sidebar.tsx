@@ -6,10 +6,13 @@ import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
 const nav = [
-  { href: '/',          label: 'Главная' },
-  { href: '/objects',   label: 'Объекты' },
-  { href: '/contracts', label: 'Договора' },
-  { href: '/incoming',  label: 'Входящие' },
+  { href: '/',                 label: 'Главная' },
+  { href: '/objects',          label: 'Объекты' },
+  { href: '/legal-entities',   label: 'Юр.лица' },
+  { href: '/contracts',        label: 'Договора' },
+  { href: '/events',           label: 'События' },
+  { href: '/tasks',            label: 'Задачи' },
+  { href: '/incoming',         label: 'Входящие' },
 ]
 
 const navAdmin = [
@@ -49,6 +52,7 @@ export default function Sidebar() {
   }
 
   const isLoggedIn = !!email
+  const isAdmin = role === 'admin'
 
   return (
     <aside className="w-56 shrink-0 bg-white border-r border-gray-200 flex flex-col">
@@ -76,7 +80,7 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {isLoggedIn && (
+      {isAdmin && (
         <div className="px-3 py-3 border-t border-gray-200 space-y-1">
           <p className="px-3 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">
             Администрирование

@@ -15,12 +15,18 @@ export default function LoginPage() {
     e.preventDefault()
     setError('')
     setLoading(true)
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) {
-      setError('Неверный email или пароль')
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) {
+        setError(error.message || 'Не удалось войти')
+        setLoading(false)
+      } else {
+        window.location.href = '/'
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(`Сбой соединения: ${msg}`)
       setLoading(false)
-    } else {
-      window.location.href = '/'
     }
   }
 
