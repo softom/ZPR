@@ -22,11 +22,16 @@ const ANCHOR_DESCRIPTION = 'Дата заключения договора'
 
 export interface ClauseRow {
   /**
-   * Опционально — pre-generated UUID. Используется для якорного пункта,
-   * чтобы дочерние пункты в этом же INSERT-batch могли ссылаться на него
-   * через term_ref_clause_id. Если null — БД генерирует через gen_random_uuid().
+   * Pre-generated UUID, обязательно. Генерируется на сервере через `randomUUID()`.
+   *
+   * Почему не полагаться на default `gen_random_uuid()` в БД:
+   * Supabase JS-клиент при INSERT отправляет JSON, в котором отсутствующие поля
+   * сериализуются как `null`. Из-за этого `default` не срабатывает (NOT NULL violated).
+   *
+   * Кроме того, заранее известный id позволяет дочерним строкам ссылаться на
+   * родительские (якорь, прочие) через `term_ref_clause_id` в одном INSERT-batch.
    */
-  id?:          string
+  id:           string
   document_id:  string
   order_index:  number
   clause_date:  string | null
@@ -99,6 +104,7 @@ export function buildClauseRows(
       id:           anchorId,
       document_id:  documentId,
       order_index:  1,
+      // (далее одинаковые с не-якорными полями)
       clause_date:  signedDate,
       description:  ANCHOR_DESCRIPTION,
       note:         null,
@@ -131,6 +137,7 @@ export function buildClauseRows(
     }
 
     rows.push({
+      id:           randomUUID(),
       document_id:  documentId,
       order_index:  (c.order_index ?? idx + 1) + offset,
       clause_date:  c.clause_date || null,

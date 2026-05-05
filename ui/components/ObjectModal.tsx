@@ -29,7 +29,10 @@ type Props = {
   onSaved?: () => void
 }
 
-const OBJECT_TYPES = ['ГОСТИНИЦА', 'АПАРТ', 'SELECT', 'ДПТ', 'ИНФРА', 'ПЕРСОНАЛ']
+const OBJECT_TYPES = ['ГОСТИНИЦА', 'АПАРТ', 'SELECT', 'ДПТ', 'ИНФРА', 'ПЕРСОНАЛ', 'МАСТЕРПЛАН']
+// Типы, для которых ёмкость не имеет смысла (мастерплан / верхний проект).
+// Код объекта генерируется без сегмента ёмкости: NNN_ТИП.
+const TYPES_WITHOUT_CAPACITY = ['МАСТЕРПЛАН']
 
 export default function ObjectModal({ open, object: obj, onClose, onCreated, onSaved }: Props) {
   const isEdit = !!obj
@@ -64,8 +67,9 @@ export default function ObjectModal({ open, object: obj, onClose, onCreated, onS
 
   if (!open) return null
 
-  const folderCode = !isEdit && form.code && form.type && form.capacity
-    ? `${form.code}_${form.type}_${form.capacity}`
+  const skipCapacity = TYPES_WITHOUT_CAPACITY.includes(form.type)
+  const folderCode = !isEdit && form.code && form.type && (skipCapacity || form.capacity)
+    ? (skipCapacity ? `${form.code}_${form.type}` : `${form.code}_${form.type}_${form.capacity}`)
     : ''
 
   function addAlias() {
@@ -115,7 +119,7 @@ export default function ObjectModal({ open, object: obj, onClose, onCreated, onS
         setSaving(false)
       }
     } else {
-      if (!form.code || !form.type || !form.capacity || !form.current_name) {
+      if (!form.code || !form.type || !form.current_name || (!skipCapacity && !form.capacity)) {
         setError('Заполните обязательные поля')
         return
       }
@@ -198,7 +202,7 @@ export default function ObjectModal({ open, object: obj, onClose, onCreated, onS
                 </div>
               ) : (
                 <>
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className={`grid gap-3 ${skipCapacity ? 'grid-cols-2' : 'grid-cols-3'}`}>
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">Номер участка *</label>
                       <input
@@ -212,28 +216,30 @@ export default function ObjectModal({ open, object: obj, onClose, onCreated, onS
                       <label className="block text-xs font-medium text-gray-600 mb-1">Тип *</label>
                       <select
                         value={form.type}
-                        onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
+                        onChange={e => setForm(f => ({ ...f, type: e.target.value, capacity: TYPES_WITHOUT_CAPACITY.includes(e.target.value) ? '' : f.capacity }))}
                         className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
                       >
                         <option value="">—</option>
                         {OBJECT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Ёмкость *</label>
-                      <input
-                        value={form.capacity}
-                        onChange={e => setForm(f => ({ ...f, capacity: e.target.value }))}
-                        placeholder="400"
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-                      />
-                    </div>
+                    {!skipCapacity && (
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Ёмкость *</label>
+                        <input
+                          value={form.capacity}
+                          onChange={e => setForm(f => ({ ...f, capacity: e.target.value }))}
+                          placeholder="400"
+                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        />
+                      </div>
+                    )}
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Код объекта (генерируется)</label>
                     <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-md">
                       <span className="font-mono text-sm text-gray-700">
-                        {folderCode || <span className="text-gray-300">006_ГОСТИНИЦА_400</span>}
+                        {folderCode || <span className="text-gray-300">{skipCapacity ? '000_МАСТЕРПЛАН' : '006_ГОСТИНИЦА_400'}</span>}
                       </span>
                       <span className="text-xs text-gray-400 ml-auto">станет неизменяемым</span>
                     </div>

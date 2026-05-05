@@ -5,15 +5,18 @@ const POLZA_BASE_URL = process.env.POLZA_BASE_URL ?? 'https://polza.ai/api/v1'
 const POLZA_API_KEY  = process.env.POLZA_API_KEY ?? ''
 const LLM_MODEL      = process.env.LLM_MODEL ?? 'anthropic/claude-sonnet-4.6'
 
+// Per-object отчёт: используем task_object_status для статуса
+// и done_date, остальные метаданные — из tasks. См. WIKI 19_Сущность_Задача
+// → "Per-object статусы".
 type Task = {
   id: string
   code: string
   title: string
   explanation: string | null
-  status: string
+  status: string                       // per-object статус (а не агрегатный tasks.status)
   priority: string | null
   due_date: string | null
-  done_date: string | null
+  done_date: string | null             // per-object done_date
   created_at: string
   source_meeting_date: string | null
 }
@@ -34,18 +37,46 @@ function weekRange(today: Date = new Date()): { start: string; end: string } {
   }
 }
 
+// ─── Резолвер: UUID | code (новый/legacy) → object_id ──────────────────────
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+async function resolveObjectId(value: string): Promise<string | null> {
+  // 1) UUID
+  if (UUID_RE.test(value)) {
+    const { data } = await supabaseAdmin.from('objects').select('id').eq('id', value).maybeSingle()
+    if (data?.id) return data.id
+  }
+  // 2) primary code
+  const { data: byCode } = await supabaseAdmin
+    .from('objects')
+    .select('id')
+    .eq('code', value)
+    .maybeSingle()
+  if (byCode?.id) return byCode.id
+  // 3) aliases jsonb (legacy code-aliases)
+  const { data: byAlias } = await supabaseAdmin
+    .from('objects')
+    .select('id')
+    .contains('aliases', JSON.stringify([value]))
+    .maybeSingle()
+  return byAlias?.id ?? null
+}
+
 // ─── GET: последний отчёт по объекту ────────────────────────────────────────
+// Слаг [id] принимает либо UUID, либо code/alias — резолвится через resolveObjectId.
 export async function GET(
   request: NextRequest,
-  ctx: { params: Promise<{ code: string }> }
+  ctx: { params: Promise<{ id: string }> }
 ) {
-  const { code } = await ctx.params
+  const { id: ref } = await ctx.params
+  const objectId = await resolveObjectId(ref)
+  if (!objectId) return NextResponse.json({ error: `Объект «${ref}» не найден` }, { status: 404 })
+
   const url = new URL(request.url)
   if (url.searchParams.get('latest') === '1' || !url.searchParams.has('latest')) {
     const { data, error } = await supabaseAdmin
       .from('object_reports_latest')
       .select('*')
-      .eq('object_code', code)
+      .eq('object_id', objectId)
       .maybeSingle()
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json({ report: data ?? null })
@@ -54,7 +85,7 @@ export async function GET(
   const { data, error } = await supabaseAdmin
     .from('object_reports')
     .select('*')
-    .eq('object_code', code)
+    .eq('object_id', objectId)
     .order('generated_at', { ascending: false })
     .limit(20)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
@@ -64,32 +95,59 @@ export async function GET(
 // ─── POST: сгенерировать новый отчёт ────────────────────────────────────────
 export async function POST(
   request: NextRequest,
-  ctx: { params: Promise<{ code: string }> }
+  ctx: { params: Promise<{ id: string }> }
 ) {
-  const { code } = await ctx.params
+  const { id: ref } = await ctx.params
 
   if (!POLZA_API_KEY) {
     return NextResponse.json({ error: 'POLZA_API_KEY не задан' }, { status: 500 })
   }
 
+  const objectId = await resolveObjectId(ref)
+  if (!objectId) return NextResponse.json({ error: `Объект «${ref}» не найден` }, { status: 404 })
+
   const { start: period_start, end: period_end } = weekRange()
 
-  // Достаём задачи объекта
-  const { data: tasks, error: taskErr } = await supabaseAdmin
-    .from('tasks')
-    .select('id, code, title, explanation, status, priority, due_date, done_date, created_at, source_meeting_date')
-    .contains('object_codes', [code])
-    .order('created_at', { ascending: true })
+  // Per-object: читаем task_object_status для этого объекта (точный статус,
+  // даже если задача связана с несколькими объектами). + tasks для метаданных.
+  // Preliminary не имеет строк junction, но в отчёте по объекту они и не нужны
+  // (preliminary — черновики, без активной работы).
+  const { data: tos, error: tosErr } = await supabaseAdmin
+    .from('task_object_status')
+    .select('task_id, status, done_date')
+    .eq('object_id', objectId)
 
-  if (taskErr) return NextResponse.json({ error: taskErr.message }, { status: 500 })
+  if (tosErr) return NextResponse.json({ error: tosErr.message }, { status: 500 })
 
-  // Имя объекта для промпта
+  let tasks: Task[] = []
+  if (tos && tos.length > 0) {
+    const taskIds = tos.map((r) => r.task_id)
+    const { data: tasksRaw, error: taskErr } = await supabaseAdmin
+      .from('tasks')
+      .select('id, code, title, explanation, priority, due_date, created_at, source_meeting_date')
+      .in('id', taskIds)
+      .order('created_at', { ascending: true })
+
+    if (taskErr) return NextResponse.json({ error: taskErr.message }, { status: 500 })
+
+    const tosByTaskId = new Map(tos.map((r) => [r.task_id, r]))
+    tasks = ((tasksRaw as Omit<Task, 'status' | 'done_date'>[]) || []).map((t) => {
+      const r = tosByTaskId.get(t.id)
+      return {
+        ...t,
+        status: r?.status ?? 'open',
+        done_date: r?.done_date ?? null,
+      }
+    })
+  }
+
+  // Имя объекта (актуальное) для промпта
   const { data: obj } = await supabaseAdmin
     .from('objects')
-    .select('current_name')
-    .eq('code', code)
+    .select('code, current_name')
+    .eq('id', objectId)
     .maybeSingle()
-  const objectLabel = obj?.current_name ? `${code} — ${obj.current_name}` : code
+  const objectLabel = obj ? `${obj.code} — ${obj.current_name}` : ref
 
   let achievements = '', weekly_work = '', problems = ''
   try {
@@ -97,7 +155,7 @@ export async function POST(
       objectLabel,
       period_start,
       period_end,
-      tasks: (tasks as Task[]) || [],
+      tasks,
     }))
     achievements = result.achievements ?? ''
     weekly_work = result.weekly_work ?? ''
@@ -110,7 +168,7 @@ export async function POST(
   const { data: inserted, error: insErr } = await supabaseAdmin
     .from('object_reports')
     .insert({
-      object_code: code,
+      object_id: objectId,
       period_start,
       period_end,
       achievements,

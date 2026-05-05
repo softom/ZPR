@@ -28,10 +28,14 @@ This file provides guidance to Claude Code when working in this repository.
 | `llm_client.py` | Обёртка над Polza.AI (LLM + эмбеддинги) | — |
 | `schedule_parser.py` | Парсинг Excel ГПР (MS Project export) | — |
 | `contracts_indexer.py` | Синхронизация и индексирование договоров | `python contracts_indexer.py` |
-| `meeting_processor.py` | Генерация задач из транскрипции собрания | `python meeting_processor.py "ПОДРЯДЧИКИ/МЛА+/Собрания/2026-04-17 ..."` |
-| `protocol_generator.py` | Генерация протокола .docx из MD-задач | `python protocol_generator.py "ПОДРЯДЧИКИ/Бюро82/Собрания/2026-04-17 ..."` |
+| `meeting_processor.py` | ⚠️ Legacy. Заменён UI-пайплайном POST `/api/protocols/[id]/process` (Next.js + Polza.AI). Используется только для исторического переразбора | `python meeting_processor.py "ПОДРЯДЧИКИ/МЛА+/Собрания/2026-04-17 ..."` |
 | `report_generator.py` | Еженедельный отчёт по всем объектам | `python report_generator.py [--date YYYY-MM-DD] [--dry-run]` |
 | `document_processor.py` | Загрузка документа в хранилище + pgvector | *(в разработке)* |
+
+**Архив (`_archive/`)** — legacy-хелперы, заменённые UI-пайплайном:
+- `tasks_create_preliminary.py` — заменён ручкой POST `/api/protocols/[id]/process`
+- `tasks_approve.py` — заменён функцией `approveAll()` в `app/protocols/[id]/page.tsx`
+- `protocol_generator.py` — заменён `ui/lib/protocol/generateDocx.ts` (npm-пакет `docx`, без шаблона)
 
 ---
 
@@ -68,6 +72,7 @@ POLZA_BASE_URL: https://polza.ai/api/v1
 D:\CODE\zpr_code\
 ├─ config.py              # ключи (в .gitignore)
 ├─ *.py                   # бэкенд-скрипты ЗПР (Python, conda env `zpr`)
+├─ _archive\              # legacy-хелперы (tasks_create_preliminary, tasks_approve, protocol_generator)
 ├─ requirements.txt       # Python-зависимости (включая supabase, python-dotenv)
 ├─ supabase\              # конфиг Local Dev (в git)
 │  ├─ config.toml

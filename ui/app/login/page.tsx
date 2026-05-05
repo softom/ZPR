@@ -15,9 +15,18 @@ export default function LoginPage() {
     e.preventDefault()
     setError('')
     setLoading(true)
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '(не задан)'
+    console.log('[login] Supabase URL:', supabaseUrl)
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Таймаут 15с при подключении к ${supabaseUrl}`)), 15000)
+    )
     try {
-      const { error } = await supabase.auth.signInWithPassword({ email, password })
+      const { error } = await Promise.race([
+        supabase.auth.signInWithPassword({ email, password }),
+        timeout,
+      ])
       if (error) {
+        console.error('[login] Auth error:', error)
         setError(error.message || 'Не удалось войти')
         setLoading(false)
       } else {
@@ -25,6 +34,7 @@ export default function LoginPage() {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      console.error('[login] Connection error:', e)
       setError(`Сбой соединения: ${msg}`)
       setLoading(false)
     }

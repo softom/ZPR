@@ -2,19 +2,37 @@
 
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import ContactFormModal, {
+  ContactFormValues,
+  EMPTY_CONTACT,
+} from './_components/ContactFormModal'
 
 type LegalEntity = {
   id: string
   name: string
-  inn: string
+  inn: string | null
   kpp: string | null
   ogrn: string | null
   address: string | null
   signatory_name: string | null
   signatory_position: string | null
+  aliases: string[]
   created_at: string
   updated_at: string
   tasks_count?: number
+  contacts_count?: number
+}
+
+type Contact = {
+  id: string
+  last_name: string
+  first_name: string
+  middle_name: string | null
+  job_title: string | null
+  email: string | null
+  phone: string | null
+  is_active: boolean
+  notes: string | null
 }
 
 const EMPTY: Omit<LegalEntity, 'id' | 'created_at' | 'updated_at'> = {
@@ -25,6 +43,7 @@ const EMPTY: Omit<LegalEntity, 'id' | 'created_at' | 'updated_at'> = {
   address: '',
   signatory_name: '',
   signatory_position: '',
+  aliases: [],
 }
 
 export default function LegalEntitiesPage() {
@@ -34,7 +53,15 @@ export default function LegalEntitiesPage() {
   const [editing, setEditing] = useState<LegalEntity | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState(EMPTY)
+  const [aliasesText, setAliasesText] = useState('')
   const [saving, setSaving] = useState(false)
+  const [contacts, setContacts] = useState<Contact[]>([])
+  const [contactsLoading, setContactsLoading] = useState(false)
+  const [contactModal, setContactModal] = useState<{
+    mode: 'create' | 'edit'
+    initial: ContactFormValues
+    editingId: string | null
+  } | null>(null)
 
   useEffect(() => {
     load()
@@ -43,7 +70,6 @@ export default function LegalEntitiesPage() {
   async function load() {
     setLoading(true)
     setError('')
-    // Подгружаем юр.лица + количество связанных задач (через подзапрос)
     const { data, error: e1 } = await supabase
       .from('legal_entities')
       .select('*')
@@ -53,22 +79,103 @@ export default function LegalEntitiesPage() {
       setLoading(false)
       return
     }
-    // Подсчёт задач — через RPC или отдельный count-запрос на каждый id
+    // Подсчёт задач и контактов — параллельно для каждого юр.лица
     const withCounts = await Promise.all(
       (data || []).map(async (le) => {
-        const { count } = await supabase
-          .from('tasks')
-          .select('id', { count: 'exact', head: true })
-          .eq('assignee_entity_id', le.id)
-        return { ...le, tasks_count: count ?? 0 }
+        const [tasksRes, contactsRes] = await Promise.all([
+          supabase
+            .from('tasks')
+            .select('id', { count: 'exact', head: true })
+            .eq('assignee_entity_id', le.id),
+          supabase
+            .from('contacts')
+            .select('id', { count: 'exact', head: true })
+            .eq('legal_entity_id', le.id),
+        ])
+        return {
+          ...le,
+          aliases: Array.isArray(le.aliases) ? le.aliases : [],
+          tasks_count: tasksRes.count ?? 0,
+          contacts_count: contactsRes.count ?? 0,
+        }
       })
     )
     setItems(withCounts)
     setLoading(false)
   }
 
+  async function loadContactsFor(legalEntityId: string) {
+    setContactsLoading(true)
+    const { data, error: e } = await supabase
+      .from('contacts')
+      .select('id,last_name,first_name,middle_name,job_title,email,phone,is_active,notes')
+      .eq('legal_entity_id', legalEntityId)
+      .order('last_name')
+    setContactsLoading(false)
+    if (e) {
+      console.error('Failed to load contacts', e)
+      setContacts([])
+      return
+    }
+    setContacts((data || []) as Contact[])
+  }
+
+  function openCreateContact() {
+    if (!editing) return
+    setContactModal({
+      mode: 'create',
+      initial: { ...EMPTY_CONTACT, legal_entity_id: editing.id },
+      editingId: null,
+    })
+  }
+
+  function openEditContact(c: Contact) {
+    setContactModal({
+      mode: 'edit',
+      initial: {
+        legal_entity_id: editing?.id ?? null,
+        last_name: c.last_name,
+        first_name: c.first_name,
+        middle_name: c.middle_name ?? '',
+        job_title: c.job_title ?? '',
+        email: c.email ?? '',
+        phone: c.phone ?? '',
+        is_active: c.is_active,
+        notes: c.notes ?? '',
+      },
+      editingId: c.id,
+    })
+  }
+
+  async function deactivateContact(c: Contact) {
+    if (!confirm(`Деактивировать «${c.last_name} ${c.first_name}»?`)) return
+    const { error: e } = await supabase
+      .from('contacts')
+      .update({ is_active: false })
+      .eq('id', c.id)
+    if (e) {
+      alert(e.message)
+      return
+    }
+    if (editing) loadContactsFor(editing.id)
+  }
+
+  async function activateContact(c: Contact) {
+    const { error: e } = await supabase
+      .from('contacts')
+      .update({ is_active: true })
+      .eq('id', c.id)
+    if (e) {
+      alert(e.message)
+      return
+    }
+    if (editing) loadContactsFor(editing.id)
+  }
+
   function openCreate() {
     setForm(EMPTY)
+    setAliasesText('')
+    setContacts([])
     setEditing(null)
     setCreating(true)
   }
@@ -76,38 +183,57 @@ export default function LegalEntitiesPage() {
   function openEdit(item: LegalEntity) {
     setForm({
       name: item.name,
-      inn: item.inn,
+      inn: item.inn ?? '',
       kpp: item.kpp ?? '',
       ogrn: item.ogrn ?? '',
       address: item.address ?? '',
       signatory_name: item.signatory_name ?? '',
       signatory_position: item.signatory_position ?? '',
+      aliases: item.aliases ?? [],
     })
+    setAliasesText((item.aliases ?? []).join('\n'))
     setEditing(item)
     setCreating(false)
+    setContacts([])
+    loadContactsFor(item.id)
   }
 
   function close() {
     setEditing(null)
     setCreating(false)
     setForm(EMPTY)
+    setAliasesText('')
+    setContacts([])
     setError('')
+    setContactModal(null)
+    // обновим основной список — счётчики контактов могли измениться
+    load()
   }
 
   async function save() {
     setSaving(true)
     setError('')
+    // aliases: одна строка = один alias, пустые игнорируем, дедуп
+    const aliases = Array.from(
+      new Set(
+        aliasesText
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      )
+    )
     const payload = {
       name: form.name.trim(),
-      inn: form.inn.trim(),
+      inn: form.inn?.trim() || null,
       kpp: form.kpp?.trim() || null,
       ogrn: form.ogrn?.trim() || null,
       address: form.address?.trim() || null,
       signatory_name: form.signatory_name?.trim() || null,
       signatory_position: form.signatory_position?.trim() || null,
+      aliases,
     }
-    if (!payload.name || !payload.inn) {
-      setError('Поля «Название» и «ИНН» обязательны')
+    if (!payload.name) {
+      setError('Поле «Название» обязательно')
       setSaving(false)
       return
     }
@@ -131,7 +257,6 @@ export default function LegalEntitiesPage() {
     }
     setSaving(false)
     close()
-    load()
   }
 
   async function remove(item: LegalEntity) {
@@ -184,9 +309,9 @@ export default function LegalEntitiesPage() {
               <tr className="text-left text-gray-700">
                 <th className="px-4 py-3">Название</th>
                 <th className="px-4 py-3">ИНН</th>
-                <th className="px-4 py-3">КПП</th>
-                <th className="px-4 py-3">Адрес</th>
+                <th className="px-4 py-3">Алиасы</th>
                 <th className="px-4 py-3">Подписант</th>
+                <th className="px-4 py-3 text-center">Контактов</th>
                 <th className="px-4 py-3 text-center">Задач</th>
                 <th className="px-4 py-3"></th>
               </tr>
@@ -195,10 +320,27 @@ export default function LegalEntitiesPage() {
               {items.map((it) => (
                 <tr key={it.id} className="border-b hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium">{it.name}</td>
-                  <td className="px-4 py-3 font-mono text-gray-700">{it.inn}</td>
-                  <td className="px-4 py-3 text-gray-600">{it.kpp || '—'}</td>
-                  <td className="px-4 py-3 text-gray-600 max-w-xs truncate">
-                    {it.address || '—'}
+                  <td className="px-4 py-3 font-mono text-gray-700">{it.inn || '—'}</td>
+                  <td className="px-4 py-3 text-gray-600 max-w-xs">
+                    {it.aliases && it.aliases.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {it.aliases.slice(0, 4).map((a, i) => (
+                          <span
+                            key={i}
+                            className="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-xs"
+                          >
+                            {a}
+                          </span>
+                        ))}
+                        {it.aliases.length > 4 && (
+                          <span className="text-xs text-gray-400">
+                            +{it.aliases.length - 4}
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-gray-600">
                     {it.signatory_name ? (
@@ -213,6 +355,17 @@ export default function LegalEntitiesPage() {
                     ) : (
                       '—'
                     )}
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                    <span
+                      className={
+                        it.contacts_count
+                          ? 'inline-block px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium'
+                          : 'text-gray-400'
+                      }
+                    >
+                      {it.contacts_count || '—'}
+                    </span>
                   </td>
                   <td className="px-4 py-3 text-center">
                     <span
@@ -279,13 +432,30 @@ export default function LegalEntitiesPage() {
                 value={form.name}
                 onChange={(v) => setForm({ ...form, name: v })}
                 placeholder="ООО «...»"
+                hint="Официальное название как в реквизитах/договоре"
               />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Альтернативные названия
+                </label>
+                <textarea
+                  value={aliasesText}
+                  onChange={(e) => setAliasesText(e.target.value)}
+                  placeholder={'Бренд / латиница / сокращение / прежнее имя\nОдна строка = один вариант'}
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 rounded font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Используется при импорте контактов и задач для разрешения
+                  разных написаний (Хэдс Групп / Heads Group / ХГ)
+                </p>
+              </div>
               <Field
-                label="ИНН *"
-                value={form.inn}
+                label="ИНН"
+                value={form.inn || ''}
                 onChange={(v) => setForm({ ...form, inn: v })}
-                placeholder="10–12 цифр"
-                hint="Уникален. При совпадении с существующим ИНН — будет ошибка"
+                placeholder="10–12 цифр (опционально)"
+                hint="Уникален. Может быть пустым для организаций до загрузки договора"
               />
               <div className="grid grid-cols-2 gap-4">
                 <Field
@@ -322,6 +492,93 @@ export default function LegalEntitiesPage() {
                   placeholder="Генеральный директор"
                 />
               </div>
+
+              {editing && (
+                <div className="pt-4 border-t">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold text-gray-700">
+                      Контакты ({contacts.length})
+                    </h3>
+                    <button
+                      onClick={openCreateContact}
+                      className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+                    >
+                      + Добавить контакт
+                    </button>
+                  </div>
+                  {contactsLoading ? (
+                    <div className="text-sm text-gray-500">Загрузка контактов…</div>
+                  ) : contacts.length === 0 ? (
+                    <div className="text-sm text-gray-400">
+                      Контактов нет. Можно также импортировать скриптом{' '}
+                      <span className="font-mono">contacts_importer.py</span>.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border rounded">
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-gray-50">
+                          <tr className="text-left text-gray-600 text-xs">
+                            <th className="px-3 py-2">ФИО</th>
+                            <th className="px-3 py-2">Должность</th>
+                            <th className="px-3 py-2">Email</th>
+                            <th className="px-3 py-2">Телефон</th>
+                            <th className="px-3 py-2"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {contacts.map((c) => {
+                            const fio = [c.last_name, c.first_name, c.middle_name]
+                              .filter(Boolean)
+                              .join(' ')
+                            return (
+                              <tr
+                                key={c.id}
+                                className={`border-t ${
+                                  c.is_active ? '' : 'text-gray-400'
+                                }`}
+                              >
+                                <td className="px-3 py-2 font-medium">{fio}</td>
+                                <td className="px-3 py-2 text-gray-600">
+                                  {c.job_title || '—'}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 font-mono text-xs">
+                                  {c.email || '—'}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 font-mono text-xs">
+                                  {c.phone || '—'}
+                                </td>
+                                <td className="px-3 py-2 text-right whitespace-nowrap">
+                                  <button
+                                    onClick={() => openEditContact(c)}
+                                    className="text-blue-600 hover:text-blue-800 text-xs mr-2"
+                                  >
+                                    Изменить
+                                  </button>
+                                  {c.is_active ? (
+                                    <button
+                                      onClick={() => deactivateContact(c)}
+                                      className="text-gray-500 hover:text-gray-700 text-xs"
+                                    >
+                                      Деактивировать
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() => activateContact(c)}
+                                      className="text-green-600 hover:text-green-800 text-xs"
+                                    >
+                                      Активировать
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="p-6 border-t bg-gray-50 flex justify-end gap-3">
               <button
@@ -341,6 +598,23 @@ export default function LegalEntitiesPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {contactModal && editing && (
+        <ContactFormModal
+          mode={contactModal.mode}
+          initial={contactModal.initial}
+          editingId={contactModal.editingId}
+          orgs={[]}
+          lockedLegalEntityId={editing.id}
+          lockedLegalEntityName={editing.name}
+          nested
+          onClose={() => setContactModal(null)}
+          onSaved={() => {
+            setContactModal(null)
+            loadContactsFor(editing.id)
+          }}
+        />
       )}
     </div>
   )

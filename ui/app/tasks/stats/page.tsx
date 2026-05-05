@@ -14,14 +14,27 @@ type Task = {
   priority: 'high' | 'medium' | 'low' | null
   assignee_org: string | null
   assignee_entity_id: string | null
-  object_codes: string[]
+  object_ids: string[]              // UUID — основная связь
   due_date: string | null
   done_date: string | null
   created_at: string
   source_meeting_date: string | null
 }
 
-type ObjectRef = { code: string; current_name: string }
+type ObjectStatusRow = {
+  task_id: string
+  object_id: string
+  status: 'open' | 'in_progress' | 'done' | 'closed' | 'cancelled'
+  done_date: string | null
+}
+
+// Композит "задача в разрезе объекта": task-метаданные + per-object status.
+type TaskOnObject = Task & {
+  object_status: ObjectStatusRow['status']
+  object_done_date: string | null
+}
+
+type ObjectRef = { id: string; code: string; current_name: string }
 type LegalEntity = { id: string; name: string; signatory_name: string | null; signatory_position: string | null }
 
 type DocumentRow = {
@@ -53,7 +66,7 @@ type Clause = {
 
 type ObjectReport = {
   id: string
-  object_code: string
+  object_id: string                  // UUID объекта
   period_start: string
   period_end: string
   achievements: string | null
@@ -81,9 +94,10 @@ function daysSince(iso: string): number {
   return Math.floor((Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24))
 }
 
-function isOverdue(t: Task): boolean {
+// Просрочена per-object: due_date в прошлом и статус **на этом объекте** активный.
+function isOverdueOnObject(t: TaskOnObject): boolean {
   if (!t.due_date) return false
-  if (['done', 'closed', 'cancelled'].includes(t.status)) return false
+  if (['done', 'closed', 'cancelled'].includes(t.object_status)) return false
   return new Date(t.due_date) < new Date(new Date().toDateString())
 }
 
@@ -135,6 +149,7 @@ function Pie({ values, size = 110 }: { values: { value: number; color: string }[
 
 export default function TasksStatsPage() {
   const [tasks, setTasks] = useState<Task[]>([])
+  const [objectStatus, setObjectStatus] = useState<ObjectStatusRow[]>([])
   const [objects, setObjects] = useState<ObjectRef[]>([])
   const [entities, setEntities] = useState<Record<string, LegalEntity>>({})
   const [docsByObject, setDocsByObject] = useState<Record<string, DocumentRow[]>>({})
@@ -151,9 +166,10 @@ export default function TasksStatsPage() {
     setLoading(true)
     setError('')
 
-    const [tasksRes, objsRes, ents, docs, lastReports] = await Promise.all([
-      supabase.from('tasks').select('id, code, title, status, priority, assignee_org, assignee_entity_id, object_codes, due_date, done_date, created_at, source_meeting_date'),
-      supabase.from('objects').select('code, current_name').order('code'),
+    const [tasksRes, tosRes, objsRes, ents, docs, lastReports] = await Promise.all([
+      supabase.from('tasks').select('id, code, title, status, priority, assignee_org, assignee_entity_id, object_ids, due_date, done_date, created_at, source_meeting_date'),
+      supabase.from('task_object_status').select('task_id, object_id, status, done_date'),
+      supabase.from('objects').select('id, code, current_name').order('code'),
       supabase.from('legal_entities').select('id, name, signatory_name, signatory_position'),
       supabase.from('documents').select('id, title, doc_number, signed_date, customer_entity_id, contractor_entity_id, parties_snapshot, deleted_at').is('deleted_at', null),
       supabase.from('object_reports_latest').select('*'),
@@ -162,12 +178,13 @@ export default function TasksStatsPage() {
     if (tasksRes.error) { setError(tasksRes.error.message); setLoading(false); return }
 
     setTasks((tasksRes.data as Task[]) || [])
+    setObjectStatus((tosRes.data as ObjectStatusRow[]) || [])
     setObjects((objsRes.data as ObjectRef[]) || [])
     const eMap: Record<string, LegalEntity> = {}
     for (const e of (ents.data as LegalEntity[]) || []) eMap[e.id] = e
     setEntities(eMap)
 
-    // documents → docsByObject
+    // documents → docsByObject (ключ = object.id)
     const docList = (docs.data as DocumentRow[]) || []
     const docIds = docList.map((d) => d.id)
     let docObjLinks: { document_id: string; object_code: string }[] = []
@@ -175,12 +192,18 @@ export default function TasksStatsPage() {
       const link = await supabase.from('document_objects').select('document_id, object_code').in('document_id', docIds)
       docObjLinks = (link.data as { document_id: string; object_code: string }[]) || []
     }
+    const objs = (objsRes.data as ObjectRef[]) || []
+    const codeToId: Record<string, string> = {}
+    for (const o of objs) codeToId[o.code] = o.id
     const dByO: Record<string, DocumentRow[]> = {}
     for (const lk of docObjLinks) {
       const doc = docList.find((d) => d.id === lk.document_id)
       if (!doc) continue
-      if (!dByO[lk.object_code]) dByO[lk.object_code] = []
-      dByO[lk.object_code].push(doc)
+      // document_objects.object_code пока legacy text — резолвим через objects.code
+      const objId = codeToId[lk.object_code]
+      if (!objId) continue
+      if (!dByO[objId]) dByO[objId] = []
+      dByO[objId].push(doc)
     }
     setDocsByObject(dByO)
 
@@ -198,76 +221,125 @@ export default function TasksStatsPage() {
       setClausesByDoc(cByD)
     }
 
-    // reports
+    // reports — ключ = object_id
     const rMap: Record<string, ObjectReport | null> = {}
     for (const r of (lastReports.data as ObjectReport[]) || []) {
-      rMap[r.object_code] = r
+      rMap[r.object_id] = r
     }
     setReports(rMap)
 
     setLoading(false)
   }
 
-  // Группы по объектам (только те, у кого есть задачи)
+  // Группы по объектам. Ключ = object_id (UUID).
+  // Per-object статус — из task_object_status (junction). Preliminary живёт
+  // на уровне tasks.status (junction для preliminary не имеет строк), поэтому
+  // считается отдельно через t.object_ids[].
   const groups = useMemo(() => {
-    const map = new Map<string, Task[]>()
+    const taskById = new Map(tasks.map((t) => [t.id, t]))
+
+    // 1) Junction → per-object items (для всех не-preliminary задач)
+    const itemsByObject = new Map<string, TaskOnObject[]>()
+    for (const r of objectStatus) {
+      const t = taskById.get(r.task_id)
+      if (!t) continue
+      const item: TaskOnObject = { ...t, object_status: r.status, object_done_date: r.done_date }
+      if (!itemsByObject.has(r.object_id)) itemsByObject.set(r.object_id, [])
+      itemsByObject.get(r.object_id)!.push(item)
+    }
+
+    // 2) Preliminary задачи → разворачиваем object_ids напрямую
+    const prelimByObject = new Map<string, Task[]>()
     for (const t of tasks) {
-      if (t.object_codes.length === 0) {
-        if (!map.has('none')) map.set('none', [])
-        map.get('none')!.push(t)
+      if (t.status !== 'preliminary') continue
+      const ids = t.object_ids ?? []
+      if (ids.length === 0) {
+        if (!prelimByObject.has('none')) prelimByObject.set('none', [])
+        prelimByObject.get('none')!.push(t)
       } else {
-        for (const oc of t.object_codes) {
-          if (!map.has(oc)) map.set(oc, [])
-          map.get(oc)!.push(t)
+        for (const oid of ids) {
+          if (!prelimByObject.has(oid)) prelimByObject.set(oid, [])
+          prelimByObject.get(oid)!.push(t)
         }
       }
     }
-    return [...map.entries()].map(([key, items]) => {
-      const o = objects.find((x) => x.code === key)
-      const label = o ? `${o.code} — ${o.current_name}` : (key === 'none' ? 'Без объекта' : key)
-      const stats = {
-        total: items.length,
-        done: items.filter((t) => ['done','closed'].includes(t.status)).length,
-        open: items.filter((t) => ['open','in_progress'].includes(t.status)).length,
-        prel: items.filter((t) => t.status === 'preliminary').length,
-        cancelled: items.filter((t) => t.status === 'cancelled').length,
-        overdue: items.filter(isOverdue).length,
-      }
-      const oldOpen = items
-        .filter((t) => ['open','in_progress','preliminary'].includes(t.status))
-        .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-        .slice(0, 5)
-      return { key, label, items, stats, oldOpen }
-    }).sort((a, b) => a.key.localeCompare(b.key))
-  }, [tasks, objects])
 
-  // Регенерация резюме для конкретного объекта
-  async function regenerateReport(code: string) {
-    setGenerating((g) => ({ ...g, [code]: true }))
+    // 3) Задачи без объектов (legacy, не имеют ни junction, ни preliminary)
+    const noneItems: TaskOnObject[] = []
+    for (const t of tasks) {
+      if (t.status === 'preliminary') continue
+      if ((t.object_ids ?? []).length > 0) continue
+      noneItems.push({ ...t, object_status: t.status === 'in_progress' ? 'in_progress' :
+        t.status === 'open' ? 'open' :
+        t.status === 'done' ? 'done' :
+        t.status === 'closed' ? 'closed' :
+        'cancelled', object_done_date: t.done_date })
+    }
+    if (noneItems.length > 0) itemsByObject.set('none', noneItems)
+
+    // 4) Объединяем все ключи из обеих map
+    const allKeys = new Set<string>([...itemsByObject.keys(), ...prelimByObject.keys()])
+
+    return [...allKeys].map((key) => {
+      const o = objects.find((x) => x.id === key)
+      const label = o ? `${o.code} — ${o.current_name}` : (key === 'none' ? 'Без объекта' : key)
+      const items = itemsByObject.get(key) ?? []
+      const prelimItems = prelimByObject.get(key) ?? []
+
+      const stats = {
+        total:     items.length + prelimItems.length,
+        done:      items.filter((t) => ['done','closed'].includes(t.object_status)).length,
+        open:      items.filter((t) => ['open','in_progress'].includes(t.object_status)).length,
+        prel:      prelimItems.length,
+        cancelled: items.filter((t) => t.object_status === 'cancelled').length,
+        overdue:   items.filter(isOverdueOnObject).length,
+      }
+
+      // «Давно невыполненные»: только активные на этом объекте + preliminary
+      const oldOpenItems = items
+        .filter((t) => ['open','in_progress'].includes(t.object_status))
+        .map((t) => ({ task: t as Task, days: daysSince(t.created_at) }))
+      const oldOpenPrelim = prelimItems
+        .map((t) => ({ task: t, days: daysSince(t.created_at) }))
+      const oldOpen = [...oldOpenItems, ...oldOpenPrelim]
+        .sort((a, b) => b.days - a.days)
+        .slice(0, 5)
+        .map((x) => x.task)
+
+      return { key, label, items, stats, oldOpen, sortKey: o?.code ?? 'я' }
+    }).sort((a, b) => a.sortKey.localeCompare(b.sortKey))
+  }, [tasks, objectStatus, objects])
+
+  // Регенерация резюме для конкретного объекта.
+  // groupKey = object.id (UUID). В URL отправляем human-readable code.
+  async function regenerateReport(groupKey: string) {
+    const o = objects.find((x) => x.id === groupKey)
+    if (!o) return
+    setGenerating((g) => ({ ...g, [groupKey]: true }))
     try {
-      const res = await fetch(`/api/objects/${encodeURIComponent(code)}/report`, { method: 'POST' })
+      const res = await fetch(`/api/objects/${encodeURIComponent(o.code)}/report`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      setReports((r) => ({ ...r, [code]: data.report }))
+      setReports((r) => ({ ...r, [groupKey]: data.report }))
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      alert(`Не удалось сгенерировать резюме для ${code}: ${msg}`)
+      alert(`Не удалось сгенерировать резюме для ${o.code}: ${msg}`)
     } finally {
-      setGenerating((g) => ({ ...g, [code]: false }))
+      setGenerating((g) => ({ ...g, [groupKey]: false }))
     }
   }
 
   // Массовая генерация — для всех объектов с задачами
   async function regenerateAll() {
     setGenAllRunning(true)
-    const codes = groups.filter((g) => g.key !== 'none').map((g) => g.key)
-    const queue = [...codes]
+    const keys = groups.filter((g) => g.key !== 'none').map((g) => g.key)
+    const queue = [...keys]
     const concurrency = 3
     const workers = Array.from({ length: concurrency }, async () => {
       while (queue.length) {
-        const c = queue.shift()
-        if (!c) break
-        await regenerateReport(c)
+        const k = queue.shift()
+        if (!k) break
+        await regenerateReport(k)
       }
     })
     await Promise.all(workers)

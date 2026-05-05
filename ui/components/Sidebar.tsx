@@ -12,6 +12,8 @@ const nav = [
   { href: '/contracts',        label: 'Договора' },
   { href: '/events',           label: 'События' },
   { href: '/tasks',            label: 'Задачи' },
+  { href: '/protocols',        label: 'Протоколы' },
+  { href: '/reports',          label: 'Отчёты' },
   { href: '/incoming',         label: 'Входящие' },
 ]
 
@@ -63,7 +65,7 @@ export default function Sidebar() {
 
       <nav className="flex-1 px-3 py-4 space-y-1">
         {nav.map(({ href, label }) => {
-          const active = pathname === href
+          const active = pathname === href || (href !== '/' && pathname.startsWith(href + '/'))
           return (
             <Link
               key={href}
@@ -86,7 +88,7 @@ export default function Sidebar() {
             Администрирование
           </p>
           {navAdmin.map(({ href, label }) => {
-            const active = pathname === href
+            const active = pathname === href || (href !== '/' && pathname.startsWith(href + '/'))
             return (
               <Link
                 key={href}
