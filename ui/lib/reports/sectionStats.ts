@@ -4,11 +4,20 @@
 import { supabaseAdmin } from '@/lib/supabase-admin'
 import { isoDate, nextPeriod, type PeriodType } from './periodHelpers'
 
+// Для задач есть два счётчика:
+//   _tasks — количество уникальных задач (то, что человек видит как «3 задачи»)
+//   _pairs — количество пар (задача × объект) — junction-строк, попадающих в категорию
+//            (то, что считается на per-object отчётах: «по 7 случаям»)
 export type SectionStats = {
-  tasks_done: number
-  tasks_active: number
-  tasks_overdue: number
-  tasks_due_next: number
+  tasks_done: number          // pairs (для совместимости со старым кодом /reports/[id])
+  tasks_active: number        // pairs
+  tasks_overdue: number       // pairs
+  tasks_due_next: number      // pairs
+  // Уникальные задачи в каждой категории — для UI экспресс-статистики
+  tasks_done_unique: number
+  tasks_active_unique: number
+  tasks_overdue_unique: number
+  tasks_due_next_unique: number
   events_in_period: number
   events_next_period: number
   events_overdue: number
@@ -48,29 +57,197 @@ export type SectionStatsWithObject = SectionStats & {
   contractors: ContractorGroup[]
 }
 
+// Глобальные totals по проекту целиком — уникальные task_ids по всему набору.
+// Сумма unique по объектам != global unique (одна задача на 3 объектах =
+// 3 в сумме unique по карточкам, но 1 в global unique).
+export type GlobalTotals = {
+  tasks_done_unique: number
+  tasks_done_pairs: number
+  tasks_active_unique: number
+  tasks_active_pairs: number
+  tasks_overdue_unique: number
+  tasks_overdue_pairs: number
+  events_in_period: number
+  topics_recent: number
+}
+
 // Подсчёт показателей для всех объектов отчёта одним батчем (для UI и summary).
+// Срезы — на КОНЕЦ ОТЧЁТНОГО ПЕРИОДА (period_end).
 export async function buildAllSectionStats(
   reportId: string,
   periodType: PeriodType,
   periodStart: Date,
   periodEnd: Date,
 ): Promise<SectionStatsWithObject[]> {
-  const next = nextPeriod(periodEnd, periodType)
-  const startISO = isoDate(periodStart)
-  const endISO = isoDate(periodEnd)
-  const nextStartISO = isoDate(next.start)
-  const nextEndISO = isoDate(next.end)
-  // todayISO больше не используется — все срезы делаем на endISO (конец отчётного периода)
-  // (если потребуется в каких-то метриках — раскомментировать)
-  // const todayISO = isoDate(new Date())
-
-  // Список объектов отчёта (через object_reports → objects)
+  // Список объектов отчёта (через object_reports)
   const sectionsRes = await supabaseAdmin
     .from('object_reports')
     .select('object_id')
     .eq('report_id', reportId)
   const objectIds = (sectionsRes.data ?? []).map((s) => s.object_id as string)
   if (objectIds.length === 0) return []
+  return computeStatsForObjects(objectIds, periodType, periodStart, periodEnd, periodEnd)
+}
+
+// Подсчёт показателей для произвольного периода — для экспресс-статистики
+// `/reports/stats` без сохранения в БД.
+//
+// • Если выбранный период УЖЕ ЗАВЕРШЁН (period_end < today) — срез на period_end.
+// • Если период ВКЛЮЧАЕТ сегодня (period_end >= today) — срез на today
+//   (актуальная картина к моменту просмотра).
+export async function buildStatsForPeriod(
+  periodType: PeriodType,
+  periodStart: Date,
+  periodEnd: Date,
+): Promise<{ stats: SectionStatsWithObject[]; totals: GlobalTotals }> {
+  // Список активных объектов
+  const objsRes = await supabaseAdmin
+    .from('objects')
+    .select('id')
+    .eq('active', true)
+    .order('code')
+  const objectIds = (objsRes.data ?? []).map((o) => o.id as string)
+  if (objectIds.length === 0) {
+    return {
+      stats: [],
+      totals: {
+        tasks_done_unique: 0, tasks_done_pairs: 0,
+        tasks_active_unique: 0, tasks_active_pairs: 0,
+        tasks_overdue_unique: 0, tasks_overdue_pairs: 0,
+        events_in_period: 0, topics_recent: 0,
+      },
+    }
+  }
+
+  // cutoff: today если period ещё не завершён, иначе period_end
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const cutoff = today < periodEnd ? today : periodEnd
+
+  const stats = await computeStatsForObjects(objectIds, periodType, periodStart, periodEnd, cutoff)
+  const totals = await computeGlobalTotals(objectIds, periodStart, periodEnd, cutoff)
+  return { stats, totals }
+}
+
+// Глобальные totals: уникальные task_ids/event_ids/topic_ids по всему проекту.
+async function computeGlobalTotals(
+  objectIds: string[],
+  periodStart: Date,
+  periodEnd: Date,
+  cutoff: Date,
+): Promise<GlobalTotals> {
+  const startISO = isoDate(periodStart)
+  const endISO = isoDate(periodEnd)
+  const cutoffISO = isoDate(cutoff)
+
+  // task_object_status по всем активным объектам
+  const tosRes = await supabaseAdmin
+    .from('task_object_status')
+    .select('task_id, object_id, status, done_date')
+    .in('object_id', objectIds)
+  const tos = (tosRes.data ?? []) as Array<{ task_id: string; object_id: string; status: string; done_date: string | null }>
+
+  const taskIds = [...new Set(tos.map((r) => r.task_id))]
+  const tasksDue = new Map<string, string | null>()
+  const tasksCreated = new Map<string, string>()
+  if (taskIds.length > 0) {
+    const tRes = await supabaseAdmin
+      .from('tasks')
+      .select('id, due_date, created_at')
+      .in('id', taskIds)
+    for (const t of (tRes.data ?? []) as Array<{ id: string; due_date: string | null; created_at: string }>) {
+      tasksDue.set(t.id, t.due_date)
+      tasksCreated.set(t.id, t.created_at)
+    }
+  }
+
+  const doneUnique = new Set<string>()
+  const activeUnique = new Set<string>()
+  const overdueUnique = new Set<string>()
+  let donePairs = 0, activePairs = 0, overduePairs = 0
+
+  for (const r of tos) {
+    // done in period
+    if (['done', 'closed'].includes(r.status) && r.done_date && r.done_date >= startISO && r.done_date <= endISO) {
+      donePairs += 1
+      doneUnique.add(r.task_id)
+    }
+    // active at cutoff
+    const created = (tasksCreated.get(r.task_id) ?? '').slice(0, 10)
+    if (!created || created > cutoffISO) continue
+    let active = false
+    if (r.status === 'open' || r.status === 'in_progress') active = true
+    else if (r.done_date && r.done_date > cutoffISO) active = true
+    if (!active) continue
+    activePairs += 1
+    activeUnique.add(r.task_id)
+    // overdue at cutoff
+    const due = tasksDue.get(r.task_id)
+    if (due && due < cutoffISO) {
+      overduePairs += 1
+      overdueUnique.add(r.task_id)
+    }
+  }
+
+  // Events in period (события — уникальны по id, без pairs/unique различия)
+  const evRes = await supabaseAdmin
+    .from('events')
+    .select('id, date_computed, date_end, object_ids')
+    .overlaps('object_ids', objectIds)
+  let events_in_period = 0
+  for (const ev of (evRes.data ?? []) as Array<{ id: string; date_computed: string | null; date_end: string | null; object_ids: string[] }>) {
+    const d = ev.date_computed ?? ev.date_end
+    if (d != null && d >= startISO && d <= endISO) events_in_period += 1
+  }
+
+  // Topics ±2 weeks
+  const lo = isoDate(new Date(periodStart.getTime() - 14 * 86400000))
+  const hi = isoDate(new Date(periodEnd.getTime() + 14 * 86400000))
+  const mRes = await supabaseAdmin
+    .from('meetings')
+    .select('id')
+    .gte('meeting_date', lo)
+    .lte('meeting_date', hi)
+  const meetingIds = (mRes.data ?? []).map((m) => m.id as string)
+  let topics_recent = 0
+  if (meetingIds.length > 0) {
+    const tRes = await supabaseAdmin
+      .from('meeting_topics')
+      .select('id, object_ids, status')
+      .in('meeting_id', meetingIds)
+      .eq('status', 'approved')
+    for (const t of (tRes.data ?? []) as Array<{ id: string; object_ids: string[] }>) {
+      const matches = (t.object_ids ?? []).some((oid) => objectIds.includes(oid))
+      if (matches) topics_recent += 1
+    }
+  }
+
+  return {
+    tasks_done_unique: doneUnique.size,
+    tasks_done_pairs: donePairs,
+    tasks_active_unique: activeUnique.size,
+    tasks_active_pairs: activePairs,
+    tasks_overdue_unique: overdueUnique.size,
+    tasks_overdue_pairs: overduePairs,
+    events_in_period,
+    topics_recent,
+  }
+}
+
+// Внутренний core — общий расчёт статистики для произвольного списка объектов.
+async function computeStatsForObjects(
+  objectIds: string[],
+  periodType: PeriodType,
+  periodStart: Date,
+  periodEnd: Date,
+  cutoff: Date,
+): Promise<SectionStatsWithObject[]> {
+  const next = nextPeriod(periodEnd, periodType)
+  const startISO = isoDate(periodStart)
+  const endISO = isoDate(periodEnd)
+  const cutoffISO = isoDate(cutoff)
+  const nextStartISO = isoDate(next.start)
+  const nextEndISO = isoDate(next.end)
 
   const objsRes = await supabaseAdmin
     .from('objects')
@@ -104,36 +281,34 @@ export async function buildAllSectionStats(
     }
   }
 
-  // Срез задач на конец периода (а не «сейчас»):
-  //   была ли существующая задача активна на дату endISO?
-  //   срез по: created_at ≤ endISO AND (status active сейчас OR done_date > endISO)
-  function wasActiveAtEnd(r: { task_id: string; status: string; done_date: string | null }): boolean {
+  // Срез задач на дату cutoff (период_end или today, в зависимости от контекста):
+  //   была ли существующая задача активна на эту дату?
+  //   срез по: created_at ≤ cutoff AND (status active сейчас OR done_date > cutoff)
+  function wasActiveAtCutoff(r: { task_id: string; status: string; done_date: string | null }): boolean {
     const created = tasksCreated.get(r.task_id) ?? ''
-    // created_at в БД — timestamptz, сравниваем с endISO как 'YYYY-MM-DD':
-    // строковое сравнение работает (ISO-формат). endISO трактуем как конец дня
-    // через сравнение «<= endISO» на дате part-of-timestamp.
-    if (created.slice(0, 10) > endISO) return false
+    if (created.slice(0, 10) > cutoffISO) return false
     if (r.status === 'open' || r.status === 'in_progress') return true
-    // Закрыта/отменена: если закрыта позже периода — на конец периода была активна
-    if (r.done_date && r.done_date > endISO) return true
+    // Закрыта/отменена: если закрыта позже cutoff — на cutoff была активна
+    if (r.done_date && r.done_date > cutoffISO) return true
     return false
   }
 
-  function wasOverdueAtEnd(r: { task_id: string; status: string; done_date: string | null }): boolean {
+  function wasOverdueAtCutoff(r: { task_id: string; status: string; done_date: string | null }): boolean {
     const due = tasksDue.get(r.task_id)
     if (!due) return false
-    if (due >= endISO) return false  // срок ещё не наступал к концу периода
-    return wasActiveAtEnd(r)
+    if (due >= cutoffISO) return false  // срок ещё не наступал к cutoff
+    return wasActiveAtCutoff(r)
   }
 
-  // События по любому из object_ids (один запрос)
+  // События-факты по любому из object_ids. После сплита 20260508_* плановые
+  // вехи живут в calendar_entries — TODO Phase 4b.
   const evRes = await supabaseAdmin
     .from('events')
-    .select('id, object_ids, fact_date, date_computed, date_end, is_planned')
+    .select('id, object_ids, date_computed, date_end')
     .overlaps('object_ids', objectIds)
   const events = (evRes.data ?? []) as Array<{
-    id: string; object_ids: string[]; fact_date: string | null;
-    date_computed: string | null; date_end: string | null; is_planned: boolean
+    id: string; object_ids: string[];
+    date_computed: string | null; date_end: string | null;
   }>
 
   // Темы за окно ±14 дней
@@ -236,46 +411,44 @@ export async function buildAllSectionStats(
     list.sort((a, b) => (b.signed_date ?? '').localeCompare(a.signed_date ?? ''))
   }
 
+  // helper: count unique task_ids в массиве junction-строк
+  const uniqTasks = (rows: Array<{ task_id: string }>): number => new Set(rows.map((r) => r.task_id)).size
+
   // Сборка по объектам. Срезы на КОНЕЦ ОТЧЁТНОГО ПЕРИОДА (period_end).
   return objectIds.map((oid) => {
     const tosForObj = tos.filter((r) => r.object_id === oid)
     // Закрыто за период: done_date в [start, end]
-    const tasks_done = tosForObj.filter((r) =>
+    const doneRows = tosForObj.filter((r) =>
       ['done', 'closed'].includes(r.status) && r.done_date && r.done_date >= startISO && r.done_date <= endISO
-    ).length
+    )
+    const tasks_done = doneRows.length
+    const tasks_done_unique = uniqTasks(doneRows)
     // Активна на конец периода (а не «сейчас»)
-    const activeAtEnd = tosForObj.filter(wasActiveAtEnd)
+    const activeAtEnd = tosForObj.filter(wasActiveAtCutoff)
     const tasks_active = activeAtEnd.length
+    const tasks_active_unique = uniqTasks(activeAtEnd)
     // Просрочена на конец периода (срок < end И активна на end)
-    const tasks_overdue = tosForObj.filter(wasOverdueAtEnd).length
-    // Со сроком в наступающем периоде (для секции «3.x») — берём из активных-на-end,
-    // проверяем due_date в окне next_period
-    const tasks_due_next = activeAtEnd.filter((r) => {
+    const overdueRows = tosForObj.filter(wasOverdueAtCutoff)
+    const tasks_overdue = overdueRows.length
+    const tasks_overdue_unique = uniqTasks(overdueRows)
+    // Со сроком в наступающем периоде (для секции «3.x»)
+    const dueNextRows = activeAtEnd.filter((r) => {
       const due = tasksDue.get(r.task_id)
       return due && due >= nextStartISO && due <= nextEndISO
-    }).length
+    })
+    const tasks_due_next = dueNextRows.length
+    const tasks_due_next_unique = uniqTasks(dueNextRows)
 
     const eventsForObj = events.filter((e) => (e.object_ids ?? []).includes(oid))
+    // events после сплита — всегда факты. В период попадают по date_computed/date_end в окне.
     const events_in_period = eventsForObj.filter((e) => {
-      const factD = e.fact_date
-      const planD = e.date_computed ?? e.date_end
-      if (factD && factD >= startISO && factD <= endISO) return true
-      if (!factD && planD && planD >= startISO && planD <= endISO) return true
-      return false
+      const d = e.date_computed ?? e.date_end
+      return d != null && d >= startISO && d <= endISO
     }).length
-    const events_next_period = eventsForObj.filter((e) => {
-      const planD = e.date_computed ?? e.date_end
-      return !e.fact_date && planD && planD >= nextStartISO && planD <= nextEndISO
-    }).length
-    // Просрочено НА КОНЕЦ ПЕРИОДА: план < end И факта нет к концу периода
-    // (если факт есть, но позже end — на конец периода тоже не было)
-    const events_overdue = eventsForObj.filter((e) => {
-      const planD = e.date_computed ?? e.date_end
-      if (!planD || planD >= endISO) return false
-      if (!e.is_planned) return false
-      const fact = e.fact_date
-      return !fact || fact > endISO
-    }).length
+    // Плановые срезы (next_period, overdue) — TODO: подтянуть из calendar_entries.
+    const events_next_period = 0
+    const events_overdue = 0
+    void cutoffISO; void nextStartISO; void nextEndISO;
 
     // Группировка договоров и задач по подрядчику
     const objContracts = docsByObjectId.get(oid) ?? []
@@ -287,7 +460,7 @@ export async function buildAllSectionStats(
       const list = objContracts.filter((c) => c.contractor_entity_id === ceid)
       const cName = list[0]?.contractor_name ?? '—'
       // Per-contractor статистика: задачи объекта где tasks.assignee_entity_id = ceid
-      // Все срезы — НА КОНЕЦ ПЕРИОДА (см. wasActiveAtEnd / wasOverdueAtEnd)
+      // Все срезы — НА КОНЕЦ ПЕРИОДА (см. wasActiveAtCutoff / wasOverdueAtCutoff)
       const cTasks = tosForObj.filter((r) => tasksAssignee.get(r.task_id) === ceid)
       return {
         contractor_entity_id: ceid,
@@ -297,8 +470,8 @@ export async function buildAllSectionStats(
           tasks_done: cTasks.filter((r) =>
             ['done', 'closed'].includes(r.status) && r.done_date && r.done_date >= startISO && r.done_date <= endISO,
           ).length,
-          tasks_active: cTasks.filter(wasActiveAtEnd).length,
-          tasks_overdue: cTasks.filter(wasOverdueAtEnd).length,
+          tasks_active: cTasks.filter(wasActiveAtCutoff).length,
+          tasks_overdue: cTasks.filter(wasOverdueAtCutoff).length,
         },
       }
     })
@@ -317,8 +490,8 @@ export async function buildAllSectionStats(
           tasks_done: orphanTasks.filter((r) =>
             ['done', 'closed'].includes(r.status) && r.done_date && r.done_date >= startISO && r.done_date <= endISO,
           ).length,
-          tasks_active: orphanTasks.filter(wasActiveAtEnd).length,
-          tasks_overdue: orphanTasks.filter(wasOverdueAtEnd).length,
+          tasks_active: orphanTasks.filter(wasActiveAtCutoff).length,
+          tasks_overdue: orphanTasks.filter(wasOverdueAtCutoff).length,
         },
       })
     }
@@ -332,6 +505,10 @@ export async function buildAllSectionStats(
       tasks_active,
       tasks_overdue,
       tasks_due_next,
+      tasks_done_unique,
+      tasks_active_unique,
+      tasks_overdue_unique,
+      tasks_due_next_unique,
       events_in_period,
       events_next_period,
       events_overdue,

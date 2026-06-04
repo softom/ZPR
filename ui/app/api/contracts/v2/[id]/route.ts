@@ -111,29 +111,33 @@ export async function DELETE(
 ) {
   const { id } = await params
 
-  // 1. Найти события, привязанные к договору через entity_links
-  const { data: eventLinks } = await supabaseAdmin
+  // 1. Найти календарные вехи, привязанные к договору через entity_links.
+  //    После сплита 20260508* — fin_*/work_*/appr_*/exec_*/contract_* живут
+  //    в calendar_entries (см. WIKI 15_Календарь_объекта).
+  const { data: calLinks } = await supabaseAdmin
     .from('entity_links')
     .select('from_id')
-    .eq('from_type', 'event')
+    .eq('from_type', 'calendar_entry')
     .eq('to_type', 'document')
     .eq('to_id', id)
 
-  const eventIds = (eventLinks ?? []).map((l) => l.from_id as string)
+  const calIds = (calLinks ?? []).map((l) => l.from_id as string)
 
-  // 2. Погасить события: удалить entity_links и сами events
-  if (eventIds.length > 0) {
+  // 2. Погасить вехи: удалить entity_links и сами calendar_entries.
+  //    CASCADE снесёт calendar_object_status и calendar_date_editions.
+  if (calIds.length > 0) {
     await supabaseAdmin
       .from('entity_links')
       .delete()
-      .in('from_id', eventIds)
-      .eq('from_type', 'event')
+      .in('from_id', calIds)
+      .eq('from_type', 'calendar_entry')
 
     await supabaseAdmin
-      .from('events')
+      .from('calendar_entries')
       .delete()
-      .in('id', eventIds)
+      .in('id', calIds)
   }
+  const eventIds = calIds  // для совместимости поля eventsDeleted в ответе
 
   // 3. Soft delete договора + очистка векторного индекса
   const { error } = await supabaseAdmin

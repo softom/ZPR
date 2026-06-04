@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code when working in this repository.
 
+> 📢 **АКТУАЛЬНО (2026-06-04) — читать всем сессиям:**
+> 1. **WIKI переехала в корень vault.** Контент поднят из `MD WIKI\` на уровень корня — сам vault
+>    `D:\Dropbox\Приложения\remotely-save\Золотые Пески России` теперь **и есть WIKI** (без подпапки).
+>    Junction `MD WIKI\` перенастроен на корень → относительные пути `MD WIKI/CLAUDE/...` работают.
+>    Висячий линк в worktree — восстановить: `.\scripts\link-wiki.ps1`.
+> 2. **Основной стек ЗПР вынесен с ПК на сервер Beget `45.130.42.178`** (Supabase pg17 + UI + Python +
+>    Хранилище; тот же бокс, что мессенджер/VPN-релей). Доступ **только по VPN (wg0)**:
+>    UI `http://10.8.0.1:3000`, SSH `ssh -i C:\Users\tigra\.ssh\zpr_vps root@45.130.42.178`.
+>    **Локальный Docker-стек на ПК выключен** — рабочий экземпляр только сервер. Детали и реквизиты —
+>    [[38_Мессенджер_self-hosted]] раздел «Сосед №3: основной стек ЗПР» + веха в [[Хроника проекта]].
+>    На боксе не трогать чужое: Caddy 80/443, wg0/wg2, sing-box, iptables.
+
 ## Проект
 
 **ЗПР = «Золотые Пески России»** — Python-скрипты для управления проектом.
@@ -101,7 +113,9 @@ D:\CODE\zpr_code\
 ```
 
 > ⚠️ `MD WIKI\` — это **directory junction**, а не обычная папка. Физически WIKI лежит в
-> синхронизируемом Obsidian-vault: `D:\Dropbox\Приложения\remotely-save\Золотые Пески России\MD WIKI`.
+> синхронизируемом Obsidian-vault: `D:\Dropbox\Приложения\remotely-save\Золотые Пески России`
+> (с 2026-06-04 **сам vault = WIKI**, без подпапки `MD WIKI`; junction сохраняет имя `MD WIKI`,
+> поэтому относительные пути `MD WIKI/CLAUDE/...` продолжают работать).
 > Junction даёт доступ по привычному относительному пути `MD WIKI/` в основном чекауте **и в каждом
 > git-worktree**. После `git clone` или создания нового worktree линк нужно восстановить:
 > `.\scripts\link-wiki.ps1` (идемпотентно, создаёт junction во всех worktree'ах).
@@ -210,9 +224,9 @@ git push
 
 Папка `MD WIKI/CLAUDE/` — база знаний проекта.
 
-**Источник истины — синхронизируемый Obsidian-vault** `D:\Dropbox\Приложения\remotely-save\Золотые Пески России\MD WIKI`
-(remotely-save → синхронизация на телефон/др. устройства). В репозиторий WIKI **не коммитится** —
-доступ через directory junction `MD WIKI\` (восстановить: `.\scripts\link-wiki.ps1`).
+**Источник истины — синхронизируемый Obsidian-vault** `D:\Dropbox\Приложения\remotely-save\Золотые Пески России`
+(сам vault и есть WIKI; remotely-save → синхронизация на телефон/др. устройства). В репозиторий WIKI **не коммитится** —
+доступ через directory junction `MD WIKI\` → корень vault (восстановить: `.\scripts\link-wiki.ps1`).
 Obsidian (`D:\Dropbox\Obsidian\Tigra\ЗПР\`) — хранилище отчётных форм (ПРОТ-*, ПРОБ-*), не база знаний.
 
 ### Структура MD WIKI

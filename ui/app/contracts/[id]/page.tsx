@@ -25,14 +25,24 @@ import {
   verticalListSortingStrategy, sortableKeyboardCoordinates,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+import ContractClausesGantt, {
+  type GanttClause as GClause,
+  type GanttContractStage as GStage,
+  type GanttEventType as GType,
+} from '@/components/ContractClausesGantt'
 
-type ClauseCategory = 'fin' | 'work' | 'appr' | 'legal'
+// 7 категорий (с 2026-05-18): fin/work/term/legal/appr/comm/ctrl.
+// Источник правды — таблица `contract_event_types`; категория в clauses — denorm.
+type ClauseCategory = 'fin' | 'work' | 'term' | 'legal' | 'appr' | 'comm' | 'ctrl'
 
 const CATEGORY_OPTIONS: { value: ClauseCategory; label: string; short: string; badge: string }[] = [
   { value: 'fin',   short: 'ФИН',  label: 'Финансовый',       badge: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
   { value: 'work',  short: 'РАБ',  label: 'Производственный', badge: 'bg-blue-100 text-blue-700 border-blue-200' },
-  { value: 'appr',  short: 'СОГЛ', label: 'Согласование',     badge: 'bg-violet-100 text-violet-700 border-violet-200' },
+  { value: 'term',  short: 'СРОК', label: 'Сроковый',         badge: 'bg-orange-100 text-orange-700 border-orange-200' },
   { value: 'legal', short: 'ЮР',   label: 'Юридический',      badge: 'bg-amber-100 text-amber-700 border-amber-200' },
+  { value: 'appr',  short: 'СОГЛ', label: 'Согласование',     badge: 'bg-violet-100 text-violet-700 border-violet-200' },
+  { value: 'comm',  short: 'КОММ', label: 'Коммуникационный', badge: 'bg-sky-100 text-sky-700 border-sky-200' },
+  { value: 'ctrl',  short: 'КОНТ', label: 'Контрольный',      badge: 'bg-rose-100 text-rose-700 border-rose-200' },
 ]
 const CATEGORY_BADGE_CLASS: Record<ClauseCategory, string> = Object.fromEntries(
   CATEGORY_OPTIONS.map(o => [o.value, o.badge])
@@ -40,6 +50,25 @@ const CATEGORY_BADGE_CLASS: Record<ClauseCategory, string> = Object.fromEntries(
 const CATEGORY_SHORT: Record<ClauseCategory, string> = Object.fromEntries(
   CATEGORY_OPTIONS.map(o => [o.value, o.short])
 ) as Record<ClauseCategory, string>
+
+interface ContractEventType {
+  id: string                                  // UUID — для FK
+  code: string                                // 'fin_advance' и т.п. — для seed/LLM
+  category: ClauseCategory
+  label: string                               // «Аванс»
+  icon: string | null
+  sort_order: number
+  is_intermediate: boolean
+  is_anchor: boolean
+  is_active: boolean
+}
+
+type DateSource = 'contract' | 'edited' | 'computed'
+const DATE_SOURCE_META: Record<DateSource, { icon: string; label: string; badge: string }> = {
+  contract: { icon: '📋', label: 'договорная',  badge: 'bg-gray-100 text-gray-700 border-gray-200' },
+  edited:   { icon: '✏️', label: 'изменённая',  badge: 'bg-amber-100 text-amber-700 border-amber-300' },
+  computed: { icon: '🧮', label: 'расчётная',   badge: 'bg-blue-100 text-blue-700 border-blue-200' },
+}
 
 interface LegalEntity {
   id: string
@@ -68,6 +97,12 @@ interface Clause {
   is_anchor: boolean
   date_mode: 'date' | 'term' | null
   category: ClauseCategory | null
+  // ─── С 2026-05-14 (этапы) ─────────────────────────────────────
+  stage_id: string | null               // FK → contract_stages.id
+  // ─── С 2026-05-18 (классификатор + статус даты) ───────────────
+  event_type_id: string | null          // FK → contract_event_types.id
+  date_source: DateSource               // 'contract' | 'edited' | 'computed'
+  date_change_event_id: string | null   // FK → events.id (причина смены даты)
 }
 
 interface ProjectStage {
@@ -76,13 +111,30 @@ interface ProjectStage {
   sort_order: number
 }
 
+interface ContractStage {
+  id: string
+  document_id: string
+  stage_number: number
+  stage_name: string
+  description: string | null
+  sort_order: number
+  is_default: boolean
+  clauses_count: number
+  clauses_with_date: number
+  is_current: boolean
+  // Поле есть в таблице, но НЕТ во view contract_stages_with_progress
+  // — поэтому в виджете используем эвристику: ручной этап = stage_number > LLM-извлечённого
+  // максимума. Для подсветки чекаем «source_quote отсутствует» через отдельный fetch не делаем.
+  source_quote?: string | null
+  source_page?: number | null
+}
+
 interface RelatedEvent {
   id: string
   title: string | null
   event_type: string
   date_end: string | null
   date_computed: string | null
-  fact_date: string | null
 }
 
 interface EventSubtypeRef {
@@ -125,13 +177,24 @@ export default function ContractDetailPage() {
 
   const [doc, setDoc] = useState<ContractDetail | null>(null)
   const [allStages, setAllStages] = useState<ProjectStage[]>([])
+  const [contractStages, setContractStages] = useState<ContractStage[]>([])
   const [eventsByClause, setEventsByClause] = useState<Record<string, RelatedEvent[]>>({})
   const [eventSubtypes, setEventSubtypes] = useState<Record<string, EventSubtypeRef>>({})
+  // С 2026-05-18: классификатор + список событий договора для пикера «событие-причина»
+  const [contractEventTypes, setContractEventTypes] = useState<ContractEventType[]>([])
+  const [docEvents, setDocEvents] = useState<{ id: string; title: string | null; date_start: string | null; event_type: string }[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [savingClause, setSavingClause] = useState<string | null>(null)
   const [reparsing, setReparsing] = useState(false)
+  const [extractingStages, setExtractingStages] = useState(false)
+  const [transitioningTo, setTransitioningTo] = useState<string | null>(null)
+  const [savingStageId, setSavingStageId] = useState<string | null>(null)
+  const [addingStage, setAddingStage] = useState(false)
+  // Событие contract_stage_change для текущего этапа — для редактирования даты перехода
+  const [currentTransition, setCurrentTransition] = useState<{ id: string; date: string | null } | null>(null)
+  const [savingTransitionDate, setSavingTransitionDate] = useState(false)
 
   // Загружаем справочники один раз
   useEffect(() => {
@@ -141,6 +204,12 @@ export default function ContractDetailPage() {
       .order('sort_order', { ascending: true })
       .then(({ data }) => setAllStages((data as unknown as ProjectStage[]) ?? []))
     supabase
+      .from('contract_event_types')
+      .select('id,code,category,label,icon,sort_order,is_intermediate,is_anchor,is_active')
+      .eq('is_active', true)
+      .order('sort_order', { ascending: true })
+      .then(({ data }) => setContractEventTypes((data as unknown as ContractEventType[]) ?? []))
+    supabase
       .from('event_subtypes')
       .select('code,category,label,icon')
       .then(({ data }) => {
@@ -149,6 +218,59 @@ export default function ContractDetailPage() {
         setEventSubtypes(map)
       })
   }, [])
+
+  const loadStages = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/contracts/v2/${id}/stages`)
+      if (!res.ok) return
+      const { stages } = await res.json() as { stages: ContractStage[] }
+      setContractStages(stages ?? [])
+
+      // Подтягиваем последнее событие contract_stage_change для текущего этапа —
+      // нужно для редактирования даты перехода прямо в виджете.
+      const current = stages?.find(s => s.is_current)
+      if (current) {
+        const { data: evs } = await supabase
+          .from('events')
+          .select('id, date_start')
+          .eq('subject_document_id', id)
+          .eq('event_type', 'contract_stage_change')
+          .eq('to_stage_id', current.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+        const ev = evs?.[0] as { id: string; date_start: string | null } | undefined
+        setCurrentTransition(ev ? { id: ev.id, date: ev.date_start } : null)
+      } else {
+        setCurrentTransition(null)
+      }
+    } catch {
+      // тихо — этапы не критичны для отображения карточки
+    }
+  }, [id])
+
+  /**
+   * Правка даты события «contract_stage_change» (переход на текущий этап).
+   * Обновляет date_start и date_end (для contract_stage_change они равны).
+   * Триггер БД current_stage_id уже выставил — здесь только аудит-дата.
+   */
+  async function updateTransitionDate(newDate: string) {
+    if (!currentTransition) return
+    const dateOrNull = newDate || null
+    setSavingTransitionDate(true)
+    setError(null)
+    try {
+      const { error: upErr } = await supabase
+        .from('events')
+        .update({ date_start: dateOrNull, date_end: dateOrNull })
+        .eq('id', currentTransition.id)
+      if (upErr) throw new Error(upErr.message)
+      setCurrentTransition({ ...currentTransition, date: dateOrNull })
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingTransitionDate(false)
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -161,22 +283,25 @@ export default function ContractDetailPage() {
       }
       const data: ContractDetail = await res.json()
       setDoc(data)
+      await loadStages()
 
-      // Загружаем связанные события для всех пунктов одним запросом
+      // События, связанные с этим договором — для пикера «событие-причина»
+      // в редактировании даты пункта. Берём те что имеют subject_document_id=doc,
+      // плюс позже можем добавить связь через entity_links.
+      const { data: evs } = await supabase
+        .from('events')
+        .select('id, title, date_start, event_type')
+        .eq('subject_document_id', id)
+        .order('date_start', { ascending: false })
+        .limit(100)
+      setDocEvents((evs as unknown as typeof docEvents) ?? [])
+
+      // clause_events удалена в миграции 20260508000003. Для пунктов договора
+      // теперь генерируются calendar_entries (см. WIKI 15_Календарь_объекта).
+      // Pipeline clauses → calendar_entries — TODO; пока секция пустая.
       const clauseIds = (data.clauses ?? []).map(c => c.id)
       if (clauseIds.length > 0) {
-        const { data: links } = await supabase
-          .from('clause_events')
-          .select('clause_id, events(id, title, event_type, date_end, date_computed, fact_date)')
-          .in('clause_id', clauseIds)
-        const map: Record<string, RelatedEvent[]> = {}
-        type Row = { clause_id: string; events: RelatedEvent | null }
-        for (const row of (links ?? []) as unknown as Row[]) {
-          if (!row.events) continue
-          if (!map[row.clause_id]) map[row.clause_id] = []
-          map[row.clause_id].push(row.events)
-        }
-        setEventsByClause(map)
+        setEventsByClause({})
       } else {
         setEventsByClause({})
       }
@@ -185,7 +310,7 @@ export default function ContractDetailPage() {
     } finally {
       setLoading(false)
     }
-  }, [id])
+  }, [id, loadStages])
 
   useEffect(() => { load() }, [load])
 
@@ -288,21 +413,20 @@ export default function ContractDetailPage() {
   }
 
   /**
-   * Повторный разбор пунктов через LLM.
-   * 1. POST /reparse → получает новый список clauses от LLM (без записи). Долго (~30–60 сек).
-   * 2. confirm с количеством → если ОК → POST /clauses/replace (DELETE+INSERT).
+   * Полный повторный разбор: этапы + пункты через LLM (2 прохода).
+   * 1. POST /reparse → возвращает {stages, clauses} от LLM. Долго (~40–80 сек).
+   * 2. confirm с количеством → если ОК → POST /clauses/replace (DELETE+INSERT обоих).
    * 3. load() для обновления.
    *
-   * Во время длинного запроса:
-   *   - кнопка disabled + текст «Анализ…»
-   *   - синий info-баннер «Запущен повторный разбор LLM…»
+   * Используется кнопкой «🔄 Переразобрать всё» — затирает И этапы И пункты.
+   * Если нужны только пункты (этапы оставить) — используй extractEvents().
    */
   async function reparse() {
-    if (!confirm('Запустить повторный разбор пунктов через LLM?\n\nТекущие пункты будут заменены результатом анализа.\nЗапрос занимает 30–60 секунд.')) return
+    if (!confirm('Запустить полный повторный разбор договора через LLM?\n\nЭтапы И пункты будут заменены результатом анализа.\nРучные правки (как этапов, так и пунктов) будут потеряны.\nЗапрос занимает 40–80 секунд.')) return
 
     setReparsing(true)
     setError(null)
-    setInfo('🔄 Запущен повторный разбор договора через LLM. Обычно занимает 30–60 секунд, не закрывайте страницу…')
+    setInfo('🔄 Запущен полный повторный разбор договора через LLM. 40–80 секунд, не закрывайте страницу…')
 
     try {
       const res = await fetch(`/api/contracts/v2/${id}/reparse`, { method: 'POST' })
@@ -312,27 +436,229 @@ export default function ContractDetailPage() {
         setInfo(null)
         return
       }
-      const { clauses: fresh } = await res.json() as { clauses: unknown[] }
+      const { stages: freshStages, clauses: fresh } = await res.json() as {
+        stages: unknown[]
+        clauses: unknown[]
+      }
       setInfo(null)
 
       const currentCount = doc?.clauses.length ?? 0
-      if (!confirm(`LLM нашёл пунктов: ${fresh.length}. Заменить ${currentCount} существующих?`)) return
+      if (!confirm(`LLM нашёл: этапов ${freshStages.length}, пунктов ${fresh.length}. Заменить ${contractStages.length} этап(а) и ${currentCount} существующих пункт(а)?`)) return
 
       setInfo('💾 Сохраняем результат…')
       const replaceRes = await fetch(`/api/contracts/v2/${id}/clauses/replace`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clauses: fresh }),
+        body: JSON.stringify({ stages: freshStages, clauses: fresh }),
       })
       if (!replaceRes.ok) throw new Error((await replaceRes.json()).error)
       await load()
-      setInfo(`✅ Заменено пунктов: ${fresh.length}`)
+      setInfo(`✅ Заменено: этапов ${freshStages.length}, пунктов ${fresh.length}`)
       setTimeout(() => setInfo(null), 3000)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
       setInfo(null)
     } finally {
       setReparsing(false)
+    }
+  }
+
+  /**
+   * «🎯 Выделить события договора» — LLM-проход ТОЛЬКО по пунктам, используя
+   * существующие contract_stages из БД (skip_stages=true).
+   *
+   * Этапы и documents.current_stage_id НЕ трогаются (preserve_stages=true в /clauses/replace).
+   * Это позволяет: 1) сначала выделить и при необходимости поправить этапы вручную,
+   * 2) потом нажать «события» — пункты разметятся stage_id согласно текущим этапам.
+   */
+  async function extractEvents() {
+    const currentCount = doc?.clauses.length ?? 0
+    const warn = currentCount > 0
+      ? `\n\nТекущие ${currentCount} пункт(а/ов) будут заменены результатом LLM.`
+      : ''
+    const stagesNote = contractStages.length === 0
+      ? '\n\n⚠️ Этапы договора ещё не выделены. Пункты получат stage_id=null — потом сможете перепривязать вручную или нажать «🎯 Выделить этапы» сперва.'
+      : `\n\nLLM учтёт ${contractStages.length} существующих этап(ов) и расставит привязку пунктов к ним.`
+
+    if (!confirm(
+      'Выделить события (пункты) договора через LLM?' +
+      warn + stagesNote +
+      '\n\nЗапрос занимает 30–60 секунд.',
+    )) return
+
+    setReparsing(true)
+    setError(null)
+    setInfo('🎯 LLM разбирает события договора. 30–60 секунд, не закрывайте страницу…')
+
+    try {
+      const res = await fetch(`/api/contracts/v2/${id}/reparse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skip_stages: true }),
+      })
+      if (!res.ok) {
+        const { error } = await res.json()
+        setError(error)
+        setInfo(null)
+        return
+      }
+      const { clauses: fresh } = await res.json() as { clauses: unknown[] }
+      setInfo('💾 Сохраняем пункты…')
+
+      const replaceRes = await fetch(`/api/contracts/v2/${id}/clauses/replace`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clauses: fresh, preserve_stages: true }),
+      })
+      if (!replaceRes.ok) throw new Error((await replaceRes.json()).error)
+      await load()
+      setInfo(`✅ Выделено событий: ${fresh.length}`)
+      setTimeout(() => setInfo(null), 3000)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+      setInfo(null)
+    } finally {
+      setReparsing(false)
+    }
+  }
+
+  // ─── Stages: выделить (для существующих договоров) + переход этапа ──────
+
+  /**
+   * POST /api/contracts/v2/[id]/extract-stages — LLM-проход 1 для договоров,
+   * у которых уже есть clauses, но contract_stages ещё нет.
+   * Источник текста: documents.extracted_text → fallback PDF.
+   * После завершения contract_clauses.stage_id обнуляется (FK ON DELETE SET NULL).
+   */
+  async function extractStages() {
+    const manualCount = contractStages.filter(s => !s.source_quote).length
+    const manualWarn = manualCount > 0
+      ? `\n\n⚠️ ВНИМАНИЕ: у договора ${manualCount} этап(а/ов), добавленных вручную — они будут БЕЗВОЗВРАТНО удалены и заменены результатом LLM.`
+      : ''
+    if (!confirm(
+      'Выделить этапы договора через LLM?\n\n' +
+      'LLM проанализирует текст договора и предложит список этапов (АГК, ОПР, МОП, ТЭП и т.п.).\n' +
+      'Существующие этапы будут заменены; привязка пунктов к этапам сбросится — её придётся\n' +
+      'восстановить вручную через UI редактора пунктов.' +
+      manualWarn +
+      '\n\nЗапрос занимает 20–40 секунд.',
+    )) return
+
+    setExtractingStages(true)
+    setError(null)
+    setInfo('🎯 Запущено выделение этапов договора через LLM. 20–40 секунд, не закрывайте страницу…')
+    try {
+      const res = await fetch(`/api/contracts/v2/${id}/extract-stages`, { method: 'POST' })
+      const data = await res.json() as { ok?: boolean; stages_count?: number; error?: string }
+      if (!res.ok || !data.ok) throw new Error(data.error ?? 'extract-stages failed')
+      await loadStages()
+      await load()  // current_stage_id мог измениться
+      setInfo(`✅ Выделено этапов: ${data.stages_count ?? 0}`)
+      setTimeout(() => setInfo(null), 4000)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+      setInfo(null)
+    } finally {
+      setExtractingStages(false)
+    }
+  }
+
+  /**
+   * Ручное добавление этапа в конец списка.
+   * Если у договора этапов 0 — новый этап становится текущим автоматически.
+   */
+  async function addStage(stageName: string, description: string | null) {
+    setAddingStage(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/contracts/v2/${id}/stages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage_name: stageName, description }),
+      })
+      const data = await res.json() as { ok?: boolean; error?: string }
+      if (!res.ok || !data.ok) throw new Error(data.error ?? 'add stage failed')
+      await loadStages()
+      await load()  // current_stage_id мог измениться, если это был первый этап
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAddingStage(false)
+    }
+  }
+
+  /**
+   * Ручная правка названия/описания этапа. Не трогает stage_number.
+   */
+  async function patchStage(stageId: string, fields: { stage_name?: string; description?: string | null }) {
+    setSavingStageId(stageId)
+    setError(null)
+    try {
+      const res = await fetch(`/api/contracts/v2/${id}/stages/${stageId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      })
+      const data = await res.json() as { ok?: boolean; error?: string }
+      if (!res.ok || !data.ok) throw new Error(data.error ?? 'patch stage failed')
+      await loadStages()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingStageId(null)
+    }
+  }
+
+  /**
+   * Удаление этапа. Если он текущий — сервер сам переключит current на следующий
+   * (или NULL, если этапов больше не остаётся).
+   * contract_clauses.stage_id у привязанных пунктов обнулится каскадом FK.
+   */
+  async function deleteStage(stageId: string, stageName: string, clausesCount: number) {
+    const warn = clausesCount > 0
+      ? `\n\nВНИМАНИЕ: к этому этапу привязано пунктов: ${clausesCount}. После удаления их stage_id обнулится — придётся перепривязать вручную.`
+      : ''
+    if (!confirm(`Удалить этап «${stageName}»?${warn}`)) return
+    setSavingStageId(stageId)
+    setError(null)
+    try {
+      const res = await fetch(`/api/contracts/v2/${id}/stages/${stageId}`, {
+        method: 'DELETE',
+      })
+      const data = await res.json() as { ok?: boolean; error?: string }
+      if (!res.ok || !data.ok) throw new Error(data.error ?? 'delete stage failed')
+      await loadStages()
+      await load()  // current_stage_id мог измениться
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingStageId(null)
+    }
+  }
+
+  /**
+   * POST /api/contracts/v2/[id]/stages/transition — создаёт событие
+   * `contract_stage_change`; триггер БД обновит documents.current_stage_id.
+   */
+  async function transitionStage(toStageId: string, toStageName: string) {
+    if (!confirm(`Перейти к этапу «${toStageName}»?\n\nБудет создано событие contract_stage_change в журнале.`)) return
+    setTransitioningTo(toStageId)
+    setError(null)
+    try {
+      const res = await fetch(`/api/contracts/v2/${id}/stages/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to_stage_id: toStageId }),
+      })
+      const data = await res.json() as { ok?: boolean; error?: string }
+      if (!res.ok || !data.ok) throw new Error(data.error ?? 'transition failed')
+      await loadStages()
+      setInfo(`✅ Текущий этап: «${toStageName}»`)
+      setTimeout(() => setInfo(null), 3000)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setTransitioningTo(null)
     }
   }
 
@@ -388,6 +714,20 @@ export default function ContractDetailPage() {
       <div className="flex items-center gap-4 mb-4">
         <button onClick={() => router.push('/contracts')} className="text-blue-600">← Назад</button>
         <h1 className="text-2xl font-bold flex-1">{doc.title}</h1>
+        <a
+          href={`/api/contracts/v2/${id}/file`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-3 py-1 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50 inline-flex items-center gap-1"
+          title={doc.folder_path
+            ? `Открыть PDF договора в новом окне (${doc.folder_path})`
+            : 'У договора нет folder_path — файл недоступен'}
+        >📄 Просмотреть договор</a>
+        <button
+          onClick={() => router.push(`/contracts/${id}/print`)}
+          className="px-3 py-1 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
+          title="Сводка для печати (договор, стороны, объекты, этапы, события)"
+        >🖨 Печать</button>
         <button onClick={archive} className="px-3 py-1 text-sm border border-red-300 text-red-600 rounded hover:bg-red-50">
           Архивировать
         </button>
@@ -470,27 +810,83 @@ export default function ContractDetailPage() {
         )}
       </div>
 
-      {/* Таблица пунктов */}
+      {/* Виджет «Этапы договора» */}
+      <StagesWidget
+        stages={contractStages}
+        extracting={extractingStages}
+        transitioningTo={transitioningTo}
+        savingStageId={savingStageId}
+        addingStage={addingStage}
+        currentTransitionDate={currentTransition?.date ?? null}
+        canEditTransitionDate={!!currentTransition}
+        savingTransitionDate={savingTransitionDate}
+        onUpdateTransitionDate={updateTransitionDate}
+        onExtract={extractStages}
+        onTransition={transitionStage}
+        onAdd={addStage}
+        onPatch={patchStage}
+        onDelete={deleteStage}
+      />
+
+      {/* Ленточный график «События договора» — с 2026-05-18.
+          Самописный SVG-Gantt (см. components/GanttChart.tsx). Группировка
+          по этапам, бары по date_source (договорная/изменённая/расчётная),
+          стрелки зависимостей по term_ref_clause_id. */}
+      {doc.clauses.length > 0 && (
+        <div className="mb-6 border rounded p-3 bg-white">
+          <div className="text-xs text-gray-500 mb-2 flex items-center justify-between">
+            <span className="font-semibold">📊 Ленточный график событий</span>
+            <span className="text-[10px] text-gray-400">
+              синий — договорная · зелёный — изменённая · серый — расчётная
+            </span>
+          </div>
+          <ContractClausesGantt
+            clauses={doc.clauses as unknown as GClause[]}
+            stages={contractStages as unknown as GStage[]}
+            eventTypes={contractEventTypes as unknown as GType[]}
+            signedDate={doc.signed_date}
+          />
+        </div>
+      )}
+
+      {/* Таблица пунктов / событий договора */}
       <div className="border rounded">
         <div className="flex items-center justify-between p-3 border-b bg-gray-50">
-          <div className="font-semibold">Пункты договора <span className="text-gray-500 text-sm">({doc.clauses.length})</span></div>
+          <div className="font-semibold">События договора <span className="text-gray-500 text-sm">({doc.clauses.length})</span></div>
           <div className="flex gap-2">
+            <button
+              onClick={extractEvents}
+              disabled={reparsing}
+              className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-wait inline-flex items-center gap-1"
+              title="LLM выделит пункты (события) с привязкой к существующим этапам. Этапы НЕ затрагиваются."
+            >
+              {reparsing && (
+                <span className="inline-block w-3 h-3 border-2 border-blue-300 border-t-white rounded-full animate-spin" />
+              )}
+              {reparsing ? 'Анализ…' : '🎯 Выделить события договора'}
+            </button>
             <button
               onClick={reparse}
               disabled={reparsing}
-              className="px-3 py-1 text-sm border border-blue-300 text-blue-600 rounded hover:bg-blue-50 disabled:opacity-50 disabled:cursor-wait inline-flex items-center gap-1"
-              title="Повторный разбор пунктов через LLM (30–60 сек)"
+              className="px-3 py-1 text-sm border border-gray-300 text-gray-600 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-wait inline-flex items-center gap-1"
+              title="Полный пересбор: этапы И пункты заново (затирает ручные правки)"
             >
-              {reparsing && (
-                <span className="inline-block w-3 h-3 border-2 border-blue-300 border-t-blue-600 rounded-full animate-spin" />
-              )}
-              {reparsing ? 'Анализ…' : '🔄 Переразобрать'}
+              {reparsing ? '…' : '🔄 Переразобрать всё'}
             </button>
-            <button onClick={addClause} disabled={reparsing} className="px-3 py-1 text-sm bg-blue-600 text-white rounded disabled:opacity-50">+ Пункт</button>
+            <button onClick={addClause} disabled={reparsing} className="px-3 py-1 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50">+ Пункт</button>
           </div>
         </div>
         {doc.clauses.length === 0 ? (
-          <div className="p-6 text-center text-gray-500">Нет пунктов. Нажмите «+ Пункт» чтобы добавить.</div>
+          <div className="p-6 text-center text-gray-500 space-y-2">
+            <div>События договора ещё не выделены.</div>
+            <div className="text-sm">
+              Нажмите <span className="font-semibold">«🎯 Выделить события договора»</span> для LLM-разбора
+              {contractStages.length > 0
+                ? ' (привязка к этапам будет автоматической)'
+                : ' (этапы рекомендуем выделить заранее — кнопка выше)'}.
+            </div>
+            <div className="text-xs text-gray-400">или «+ Пункт» — для ручного добавления.</div>
+          </div>
         ) : (<>
           {/* Legend: цветовая схема режимов */}
           <div className="text-xs text-gray-500 mb-2 px-3 pt-2 flex flex-wrap gap-4 items-center">
@@ -517,6 +913,9 @@ export default function ContractDetailPage() {
                     events={eventsByClause[c.id] ?? []}
                     eventSubtypes={eventSubtypes}
                     computed={computedDates.get(c.id) ?? null}
+                    contractEventTypes={contractEventTypes}
+                    docEvents={docEvents}
+                    contractStages={contractStages}
                     onPatch={fields => patchClause(c.id, fields)}
                     onDelete={() => deleteClause(c.id)}
                     saving={savingClause === c.id}
@@ -534,17 +933,24 @@ export default function ContractDetailPage() {
 // ─── ClauseRow — inline-редактируемая строка ───────────────────────────────
 
 function ClauseRow({
-  clause, allClauses, events, eventSubtypes, computed, onPatch, onDelete, saving,
+  clause, allClauses, events, eventSubtypes, computed,
+  contractEventTypes, docEvents, contractStages,
+  onPatch, onDelete, saving,
 }: {
   clause: Clause
   allClauses: Clause[]
   events: RelatedEvent[]
   eventSubtypes: Record<string, EventSubtypeRef>
   computed: ClauseDateResult | null
+  contractEventTypes: ContractEventType[]
+  docEvents: { id: string; title: string | null; date_start: string | null; event_type: string }[]
+  contractStages: ContractStage[]
   onPatch: (fields: Partial<Clause>) => void
   onDelete: () => void
   saving: boolean
 }) {
+  // UI-state для пикера события-причины
+  const [eventPickerOpen, setEventPickerOpen] = useState(false)
   const router = useRouter()
   const [local, setLocal] = useState(clause)
   useEffect(() => { setLocal(clause) }, [clause])
@@ -625,17 +1031,42 @@ function ClauseRow({
     }
   }
 
-  // При empty mode — первый ввод определяет режим
+  // При empty mode — первый ввод определяет режим.
+  // Любая ручная правка даты пользователем → date_source='edited' (раньше было contract).
+  // Для возврата к договорной — отдельная кнопка-бейдж рядом с датой.
   function commitDateAutoMode() {
     const after = local.clause_date
     const before = clause.clause_date
     if (after === before) return
+    const patch: Partial<Clause> = { clause_date: after }
     if (mode === null && after) {
-      setLocal({ ...local, date_mode: 'date' })
-      onPatch({ clause_date: after, date_mode: 'date' })
-    } else {
-      onPatch({ clause_date: after })
+      patch.date_mode = 'date'
     }
+    // Помечаем как «изменённая» если значение реально поменялось от того что было в БД.
+    if (clause.date_source !== 'edited' && after !== clause.clause_date) {
+      patch.date_source = 'edited'
+    }
+    setLocal({ ...local, ...patch })
+    onPatch(patch)
+  }
+
+  // Сброс статуса на «договорная»: значение даты остаётся, ссылка на событие чистится.
+  function markDateAsContract() {
+    if (clause.date_source === 'contract' && !clause.date_change_event_id) return
+    const patch: Partial<Clause> = { date_source: 'contract', date_change_event_id: null }
+    setLocal({ ...local, ...patch })
+    onPatch(patch)
+  }
+
+  // Привязка события-причины к смене даты (date_source = 'edited').
+  function setDateChangeEvent(eventId: string | null) {
+    const patch: Partial<Clause> = {
+      date_change_event_id: eventId,
+      date_source: 'edited',
+    }
+    setLocal({ ...local, ...patch })
+    onPatch(patch)
+    setEventPickerOpen(false)
   }
 
   function commitTermFieldAutoMode<F extends 'term_days' | 'term_type' | 'term_base'>(
@@ -759,6 +1190,62 @@ function ClauseRow({
             className={`px-1 py-0.5 rounded text-xs w-full ${dateBoxClass}`}
             title={dateTitle}
           />
+          {/* Статус даты + пикер события-причины (с 2026-05-18) */}
+          {!clause.is_anchor && (() => {
+            // Эффективный date_source: если режим term — то computed (на лету), иначе хранимое.
+            const effectiveSource: DateSource = isTermMode ? 'computed' : local.date_source
+            const meta = DATE_SOURCE_META[effectiveSource]
+            const linkedEvent = local.date_change_event_id
+              ? docEvents.find(e => e.id === local.date_change_event_id) ?? null
+              : null
+            return (
+              <div className="flex items-center gap-1 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => effectiveSource === 'edited' && markDateAsContract()}
+                  disabled={effectiveSource !== 'edited'}
+                  className={`inline-flex items-center gap-0.5 px-1 py-0.5 text-[10px] rounded border ${meta.badge} ${effectiveSource === 'edited' ? 'cursor-pointer hover:opacity-70' : 'cursor-default'}`}
+                  title={effectiveSource === 'edited'
+                    ? `Дата ${meta.label}${linkedEvent ? ` (причина: «${linkedEvent.title ?? linkedEvent.event_type}»)` : ''}. Кликнуть → сбросить в «договорную».`
+                    : `Дата ${meta.label}`}
+                >
+                  <span>{meta.icon}</span>
+                  <span className="font-medium">{meta.label}</span>
+                </button>
+                {effectiveSource !== 'computed' && (
+                  <button
+                    type="button"
+                    onClick={() => setEventPickerOpen(v => !v)}
+                    className="text-[10px] text-gray-500 hover:text-blue-600 px-1 py-0.5 border border-gray-200 rounded"
+                    title="Указать событие-причину смены даты (письмо/протокол)"
+                  >🔗 {linkedEvent ? '✓' : 'событие'}</button>
+                )}
+              </div>
+            )
+          })()}
+          {/* Пикер события-причины (мини-popover) */}
+          {eventPickerOpen && (
+            <div className="border rounded p-2 bg-white shadow-sm space-y-1">
+              <div className="text-[10px] text-gray-500 mb-1">Событие-причина смены даты:</div>
+              <select
+                value={local.date_change_event_id ?? ''}
+                onChange={e => setDateChangeEvent(e.target.value || null)}
+                className="w-full px-1 py-0.5 border rounded text-[11px]"
+              >
+                <option value="">— нет —</option>
+                {docEvents.map(ev => (
+                  <option key={ev.id} value={ev.id}>
+                    {ev.date_start ?? '—'} · {ev.title ?? ev.event_type}
+                  </option>
+                ))}
+              </select>
+              {docEvents.length === 0 && (
+                <div className="text-[10px] text-gray-400 italic">
+                  Нет связанных с договором событий. Создайте письмо/протокол на странице /events.
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-1">
             <input
               type="number"
@@ -805,23 +1292,70 @@ function ClauseRow({
           {isTermMode && computedReason && !computedDate && (
             <div className="text-[10px] text-amber-600 italic">{computedReason}</div>
           )}
+          {/* Тип события договора — из классификатора contract_event_types.
+              Категория (для бейджа) денорм-синкается триггером БД, так что
+              после смены event_type_id оптимистично обновляем local.category. */}
           <select
-            value={local.category ?? ''}
+            value={local.event_type_id ?? ''}
             onChange={e => {
-              const v = (e.target.value || null) as ClauseCategory | null
-              setLocal({ ...local, category: v })
-              if (v !== clause.category) onPatch({ category: v })
+              const newId = e.target.value || null
+              const picked = contractEventTypes.find(t => t.id === newId) ?? null
+              setLocal({
+                ...local,
+                event_type_id: newId,
+                category: picked?.category ?? null,
+              })
+              if (newId !== clause.event_type_id) {
+                onPatch({ event_type_id: newId, category: picked?.category ?? null })
+              }
             }}
-            className={`w-full text-[11px] px-1.5 py-1 border rounded font-semibold uppercase tracking-wide ${
+            className={`w-full text-[11px] px-1.5 py-1 border rounded font-semibold tracking-wide ${
               local.category ? CATEGORY_BADGE_CLASS[local.category] : 'bg-gray-50 text-gray-400 border-gray-200'
             }`}
-            title="Категория пункта"
+            title="Тип события договора (из классификатора)"
           >
-            <option value="">— тип —</option>
-            {CATEGORY_OPTIONS.map(o => (
-              <option key={o.value} value={o.value}>{o.short} · {o.label}</option>
-            ))}
+            <option value="">— тип события —</option>
+            {CATEGORY_OPTIONS.map(catOpt => {
+              const types = contractEventTypes.filter(t => t.category === catOpt.value)
+              if (!types.length) return null
+              return (
+                <optgroup key={catOpt.value} label={`${catOpt.short} · ${catOpt.label}`}>
+                  {types.map(t => (
+                    <option key={t.id} value={t.id}>
+                      {t.icon ? `${t.icon} ` : ''}{t.label}{t.is_intermediate ? ' · промежут.' : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )
+            })}
           </select>
+
+          {/* Привязка к этапу договора — ручной dropdown (с 2026-05-18).
+              Якорь не привязывается к этапу, у него селектор не показываем. */}
+          {!clause.is_anchor && (
+            <select
+              value={local.stage_id ?? ''}
+              onChange={e => {
+                const newStageId = e.target.value || null
+                setLocal({ ...local, stage_id: newStageId })
+                if (newStageId !== clause.stage_id) onPatch({ stage_id: newStageId })
+              }}
+              className={`w-full text-[11px] px-1.5 py-1 border rounded ${
+                local.stage_id ? 'bg-violet-50 text-violet-800 border-violet-300' : 'bg-gray-50 text-gray-500 border-gray-200'
+              }`}
+              title="Этап договора, к которому относится это событие"
+            >
+              <option value="">— без этапа —</option>
+              {contractStages
+                .slice()
+                .sort((a, b) => a.sort_order - b.sort_order)
+                .map(s => (
+                  <option key={s.id} value={s.id}>
+                    🎯 Этап {s.stage_number} · {s.stage_name}
+                  </option>
+                ))}
+            </select>
+          )}
         </div>
 
         {/* Источник из договора (read-only) + примечание + цитата формулы — на оставшуюся ширину */}
@@ -872,7 +1406,7 @@ function ClauseRow({
                   <button
                     key={ev.id}
                     onClick={() => router.push('/events')}
-                    title={`${st?.label ?? ev.event_type}${ev.fact_date ? ` (факт ${ev.fact_date})` : ''}`}
+                    title={st?.label ?? ev.event_type}
                     className={`text-left px-1.5 py-0.5 rounded text-xs border hover:opacity-80 truncate inline-flex items-center gap-1 ${badgeClass}`}
                   >
                     <span className="flex-shrink-0">{icon}</span>
@@ -883,6 +1417,366 @@ function ClauseRow({
             </div>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── StagesWidget — список этапов договора + переход + выделение ────────────
+
+interface StagesWidgetProps {
+  stages: ContractStage[]
+  extracting: boolean
+  transitioningTo: string | null
+  savingStageId: string | null
+  addingStage: boolean
+  /** Дата последнего contract_stage_change-события на текущий этап (для редактирования). */
+  currentTransitionDate: string | null
+  /** Есть ли событие перехода — без него редактировать нечего. */
+  canEditTransitionDate: boolean
+  savingTransitionDate: boolean
+  onUpdateTransitionDate: (newDate: string) => void
+  onExtract: () => void
+  onTransition: (stageId: string, stageName: string) => void
+  onAdd: (stageName: string, description: string | null) => void
+  onPatch: (stageId: string, fields: { stage_name?: string; description?: string | null }) => void
+  onDelete: (stageId: string, stageName: string, clausesCount: number) => void
+}
+
+function StagesWidget({
+  stages, extracting, transitioningTo, savingStageId, addingStage,
+  currentTransitionDate, canEditTransitionDate, savingTransitionDate, onUpdateTransitionDate,
+  onExtract, onTransition, onAdd, onPatch, onDelete,
+}: StagesWidgetProps) {
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+
+  const hasStages = stages.length > 0
+  const currentIdx = stages.findIndex(s => s.is_current)
+  const next = currentIdx >= 0 && currentIdx + 1 < stages.length ? stages[currentIdx + 1] : null
+
+  // Пустое состояние — карточка с кнопками «🎯 Выделить этапы» / «+ Добавить»
+  if (!hasStages) {
+    return (
+      <div className="mb-6 border-2 border-dashed border-gray-300 rounded p-4 bg-gray-50/50">
+        <div className="flex items-center gap-3 mb-2">
+          <div className="flex-1">
+            <div className="font-semibold text-gray-700">Этапы договора</div>
+            <div className="text-sm text-gray-500 mt-1">
+              Этапы не выделены. Запустите LLM-анализ или добавьте этап вручную.
+            </div>
+          </div>
+          <button
+            onClick={onExtract}
+            disabled={extracting}
+            className="px-4 py-2 text-sm bg-violet-600 text-white rounded hover:bg-violet-700 disabled:opacity-50 disabled:cursor-wait inline-flex items-center gap-2"
+            title="LLM-анализ текста договора → список этапов"
+          >
+            {extracting && (
+              <span className="inline-block w-3 h-3 border-2 border-violet-300 border-t-white rounded-full animate-spin" />
+            )}
+            {extracting ? 'Анализ…' : '🎯 Выделить этапы'}
+          </button>
+          <button
+            onClick={() => setShowAddForm(v => !v)}
+            disabled={extracting || addingStage}
+            className="px-3 py-2 text-sm border border-gray-300 text-gray-700 rounded hover:bg-white disabled:opacity-50"
+            title="Добавить этап вручную"
+          >
+            ✏️ Вручную
+          </button>
+        </div>
+        {showAddForm && (
+          <AddStageForm
+            saving={addingStage}
+            onCancel={() => setShowAddForm(false)}
+            onSubmit={async (name, desc) => {
+              await onAdd(name, desc)
+              setShowAddForm(false)
+            }}
+          />
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="mb-6 border rounded">
+      <div className="flex items-center justify-between p-3 border-b bg-gray-50">
+        <div className="font-semibold">
+          Этапы договора <span className="text-gray-500 text-sm">({stages.length})</span>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowAddForm(v => !v)}
+            disabled={extracting || addingStage}
+            className="px-3 py-1 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50"
+            title="Добавить новый этап вручную (в конец списка)"
+          >
+            + Этап
+          </button>
+          <button
+            onClick={onExtract}
+            disabled={extracting}
+            className="px-3 py-1 text-sm border border-violet-300 text-violet-700 rounded hover:bg-violet-50 disabled:opacity-50 disabled:cursor-wait inline-flex items-center gap-1"
+            title="Перезапустить LLM-анализ этапов (текущие этапы будут заменены, ручные правки потеряются)"
+          >
+            {extracting && (
+              <span className="inline-block w-3 h-3 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" />
+            )}
+            {extracting ? 'Анализ…' : '🔄 Перевыделить этапы'}
+          </button>
+        </div>
+      </div>
+      <ul className="divide-y">
+        {stages.map(s => {
+          const isCurrent = s.is_current
+          const isTransitioning = transitioningTo === s.id
+          const isManual = !s.source_quote  // ручной этап (добавлен оператором, без LLM-источника)
+          const isEditing = editingId === s.id
+          const isSaving = savingStageId === s.id
+
+          return (
+            <li
+              key={s.id}
+              className={`p-3 ${isCurrent ? 'bg-emerald-50/60 border-l-4 border-emerald-500' : ''} ${isSaving ? 'opacity-60' : ''}`}
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 w-7 text-center pt-0.5">
+                  {isCurrent
+                    ? <span title="Текущий этап" className="text-emerald-600">📌</span>
+                    : <span className="text-gray-300">○</span>}
+                </div>
+                <div className="flex-1 min-w-0">
+                  {isEditing ? (
+                    <EditStageForm
+                      initial={{ stage_name: s.stage_name, description: s.description }}
+                      saving={isSaving}
+                      onCancel={() => setEditingId(null)}
+                      onSubmit={async (name, desc) => {
+                        await onPatch(s.id, { stage_name: name, description: desc })
+                        setEditingId(null)
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <div className="flex items-baseline gap-2 flex-wrap">
+                        <span className="font-semibold">
+                          Этап {s.stage_number}. {s.stage_name}
+                        </span>
+                        {isCurrent && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider bg-emerald-600 text-white rounded">
+                            ТЕКУЩИЙ
+                          </span>
+                        )}
+                        {isCurrent && canEditTransitionDate && (
+                          <label className="inline-flex items-center gap-1 text-[11px] text-gray-600">
+                            <span title="Дата перехода на этот этап (событие contract_stage_change). Изменение даты пишется в журнал событий.">📅 переход:</span>
+                            <input
+                              type="date"
+                              value={currentTransitionDate ?? ''}
+                              onChange={e => onUpdateTransitionDate(e.target.value)}
+                              disabled={savingTransitionDate}
+                              className="px-1 py-0.5 border border-emerald-200 rounded text-[11px] bg-white"
+                              title="Редактирует событие contract_stage_change для текущего этапа"
+                            />
+                            {savingTransitionDate && (
+                              <span className="inline-block w-3 h-3 border-2 border-emerald-300 border-t-emerald-600 rounded-full animate-spin" />
+                            )}
+                          </label>
+                        )}
+                        {s.is_default && !isCurrent && (
+                          <span className="text-[10px] text-gray-400 italic">по умолчанию</span>
+                        )}
+                        {isManual && (
+                          <span
+                            className="px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-200 rounded"
+                            title="Этап добавлен вручную оператором (не из LLM-разбора). При «🔄 Перевыделить этапы» будет затёрт."
+                          >
+                            ✏️ ручной
+                          </span>
+                        )}
+                      </div>
+                      {s.description && (
+                        <div className="text-sm text-gray-600 mt-1">{s.description}</div>
+                      )}
+                      <div className="text-xs text-gray-500 mt-1">
+                        Пунктов: {s.clauses_count}
+                        {s.clauses_with_date > 0 && ` · с датой: ${s.clauses_with_date}`}
+                        {s.source_page != null && ` · стр. ${s.source_page}`}
+                      </div>
+                    </>
+                  )}
+                </div>
+                {!isEditing && (
+                  <div className="flex-shrink-0 flex flex-col items-end gap-1">
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setEditingId(s.id)}
+                        disabled={isSaving}
+                        className="px-1.5 py-0.5 text-xs text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded"
+                        title="Редактировать название и описание"
+                      >✏️</button>
+                      <button
+                        onClick={() => onDelete(s.id, s.stage_name, s.clauses_count)}
+                        disabled={isSaving}
+                        className="px-1.5 py-0.5 text-xs text-gray-500 hover:text-red-600 hover:bg-red-50 rounded"
+                        title="Удалить этап (привязка пунктов сбросится)"
+                      >✕</button>
+                    </div>
+                    {!isCurrent && (
+                      <button
+                        onClick={() => onTransition(s.id, s.stage_name)}
+                        disabled={!!transitioningTo || isSaving}
+                        className="px-2.5 py-1 text-xs border border-emerald-300 text-emerald-700 rounded hover:bg-emerald-50 disabled:opacity-40 inline-flex items-center gap-1"
+                        title="Установить как текущий этап (создаётся событие contract_stage_change)"
+                      >
+                        {isTransitioning && (
+                          <span className="inline-block w-3 h-3 border-2 border-emerald-300 border-t-emerald-600 rounded-full animate-spin" />
+                        )}
+                        Сделать текущим
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+
+      {/* Форма добавления нового этапа */}
+      {showAddForm && (
+        <div className="p-3 border-t bg-gray-50/60">
+          <AddStageForm
+            saving={addingStage}
+            onCancel={() => setShowAddForm(false)}
+            onSubmit={async (name, desc) => {
+              await onAdd(name, desc)
+              setShowAddForm(false)
+            }}
+          />
+        </div>
+      )}
+
+      {next && (
+        <div className="p-3 border-t bg-emerald-50/40 flex items-center justify-between">
+          <div className="text-sm text-gray-700">
+            Следующий этап: <span className="font-semibold">«{next.stage_name}»</span>
+          </div>
+          <button
+            onClick={() => onTransition(next.id, next.stage_name)}
+            disabled={!!transitioningTo}
+            className="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50 inline-flex items-center gap-2"
+            title="Завершить текущий этап и перейти к следующему"
+          >
+            {transitioningTo === next.id && (
+              <span className="inline-block w-3 h-3 border-2 border-emerald-200 border-t-white rounded-full animate-spin" />
+            )}
+            ✅ Завершить этап → перейти к «{next.stage_name}»
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Формы для добавления/редактирования этапа ────────────────────
+
+function AddStageForm({
+  saving, onCancel, onSubmit,
+}: {
+  saving: boolean
+  onCancel: () => void
+  onSubmit: (name: string, description: string | null) => void | Promise<void>
+}) {
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+  return (
+    <div className="space-y-2">
+      <div className="text-xs text-gray-500 mb-1">Добавить новый этап (в конец списка):</div>
+      <input
+        type="text"
+        value={name}
+        onChange={e => setName(e.target.value)}
+        placeholder="Название этапа (например: АГК — Подэтап 1: предварительные варианты)"
+        className="w-full px-2 py-1.5 border rounded text-sm"
+        disabled={saving}
+        autoFocus
+      />
+      <textarea
+        value={desc}
+        onChange={e => setDesc(e.target.value)}
+        placeholder="Описание (опционально)…"
+        rows={2}
+        className="w-full px-2 py-1.5 border rounded text-sm"
+        disabled={saving}
+      />
+      <div className="flex gap-2 justify-end">
+        <button
+          onClick={onCancel}
+          disabled={saving}
+          className="px-3 py-1 text-sm border border-gray-300 text-gray-600 rounded hover:bg-white"
+        >Отмена</button>
+        <button
+          onClick={() => onSubmit(name.trim(), desc.trim() || null)}
+          disabled={saving || !name.trim()}
+          className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1"
+        >
+          {saving && (
+            <span className="inline-block w-3 h-3 border-2 border-blue-200 border-t-white rounded-full animate-spin" />
+          )}
+          Сохранить
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function EditStageForm({
+  initial, saving, onCancel, onSubmit,
+}: {
+  initial: { stage_name: string; description: string | null }
+  saving: boolean
+  onCancel: () => void
+  onSubmit: (name: string, description: string | null) => void | Promise<void>
+}) {
+  const [name, setName] = useState(initial.stage_name)
+  const [desc, setDesc] = useState(initial.description ?? '')
+  return (
+    <div className="space-y-2">
+      <input
+        type="text"
+        value={name}
+        onChange={e => setName(e.target.value)}
+        className="w-full px-2 py-1.5 border-2 border-blue-400 rounded text-sm font-semibold"
+        disabled={saving}
+        autoFocus
+      />
+      <textarea
+        value={desc}
+        onChange={e => setDesc(e.target.value)}
+        rows={3}
+        placeholder="Описание этапа…"
+        className="w-full px-2 py-1.5 border rounded text-sm"
+        disabled={saving}
+      />
+      <div className="flex gap-2 justify-end">
+        <button
+          onClick={onCancel}
+          disabled={saving}
+          className="px-3 py-1 text-sm border border-gray-300 text-gray-600 rounded hover:bg-white"
+        >Отмена</button>
+        <button
+          onClick={() => onSubmit(name.trim(), desc.trim() || null)}
+          disabled={saving || !name.trim()}
+          className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1"
+        >
+          {saving && (
+            <span className="inline-block w-3 h-3 border-2 border-blue-200 border-t-white rounded-full animate-spin" />
+          )}
+          Сохранить
+        </button>
       </div>
     </div>
   )

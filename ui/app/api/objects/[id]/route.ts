@@ -22,6 +22,19 @@ export async function PATCH(
     const v = body.llm_hint
     update.llm_hint = typeof v === 'string' ? v : v == null ? null : String(v)
   }
+  // Срок действия llm_hint (YYYY-MM-DD или null)
+  for (const k of ['llm_hint_valid_from', 'llm_hint_valid_until']) {
+    if (k in body) {
+      const v = body[k]
+      if (v === null || v === '') {
+        update[k] = null
+      } else if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+        update[k] = v
+      } else {
+        return NextResponse.json({ error: `${k} должен быть YYYY-MM-DD или null` }, { status: 400 })
+      }
+    }
+  }
   if (Object.keys(update).length === 0) {
     return NextResponse.json({ error: 'Нечего обновлять' }, { status: 400 })
   }

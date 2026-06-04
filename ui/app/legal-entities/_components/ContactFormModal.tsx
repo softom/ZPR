@@ -92,8 +92,11 @@ export default function ContactFormModal({
     }
     setSaving(false)
     if (err) {
+      console.error('[contact save]', err)
       if (err.code === '23505' || err.message.includes('contacts_unique_per_org_idx')) {
         setError('Контакт с таким ФИО уже существует в этой организации')
+      } else if (err.message.includes('row-level security') || err.message.includes('row level security')) {
+        setError('Нет прав. Сессия могла истечь — выйдите и войдите снова (нужна роль uploader / admin).')
       } else {
         setError(err.message)
       }
@@ -119,12 +122,6 @@ export default function ContactFormModal({
           </h2>
         </div>
         <div className="p-6 space-y-4">
-          {error && (
-            <div className="p-3 bg-red-50 text-red-700 border border-red-200 rounded text-sm">
-              {error}
-            </div>
-          )}
-
           {lockedLegalEntityId ? (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -222,21 +219,28 @@ export default function ContactFormModal({
             />
           </div>
         </div>
-        <div className="p-6 border-t bg-gray-50 flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            disabled={saving}
-            className="px-4 py-2 bg-white border rounded hover:bg-gray-50 disabled:opacity-50"
-          >
-            Отмена
-          </button>
-          <button
-            onClick={save}
-            disabled={saving}
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-          >
-            {saving ? 'Сохранение…' : 'Сохранить'}
-          </button>
+        <div className="p-6 border-t bg-gray-50">
+          {error && (
+            <div className="p-3 mb-3 bg-red-50 text-red-700 border border-red-200 rounded text-sm">
+              {error}
+            </div>
+          )}
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="px-4 py-2 bg-white border rounded hover:bg-gray-50 disabled:opacity-50"
+            >
+              Отмена
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? 'Сохранение…' : 'Сохранить'}
+            </button>
+          </div>
         </div>
       </div>
     </div>

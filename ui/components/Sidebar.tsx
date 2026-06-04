@@ -8,12 +8,15 @@ import { supabase } from '@/lib/supabase'
 const nav = [
   { href: '/',                 label: 'Главная' },
   { href: '/objects',          label: 'Объекты' },
+  { href: '/plots',            label: 'Карта' },
   { href: '/legal-entities',   label: 'Юр.лица' },
   { href: '/contracts',        label: 'Договора' },
   { href: '/events',           label: 'События' },
+  { href: '/calendar',         label: 'Календарь' },
   { href: '/tasks',            label: 'Задачи' },
   { href: '/protocols',        label: 'Протоколы' },
   { href: '/reports',          label: 'Отчёты' },
+  { href: '/strategic-topics', label: 'Стратегия' },
   { href: '/incoming',         label: 'Входящие' },
 ]
 

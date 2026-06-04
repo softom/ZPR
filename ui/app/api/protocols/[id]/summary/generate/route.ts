@@ -17,6 +17,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase-admin'
+import { loadResolutions, type ClosureRow } from '@/lib/protocol/loadResolutions'
 
 export const maxDuration = 90
 
@@ -59,7 +60,10 @@ export async function POST(
     )
   }
 
-  const [topicsRes, tasksRes, objectsRes, closedTosRes] = await Promise.all([
+  // Раздел «ВЫПОЛНЕНО» теперь строится по новой модели жизненного цикла:
+  // окно «от предыдущего собрания до текущего» × per-object закрытия с
+  // источником через entity_links(resolved_by). См. lib/protocol/loadResolutions.
+  const [topicsRes, tasksRes, objectsRes, resolutions] = await Promise.all([
     supabaseAdmin
       .from('meeting_topics')
       .select('seq,title,content,raised_by_org')
@@ -72,15 +76,11 @@ export async function POST(
       .eq('meeting_id', id)
       .order('code'),
     supabaseAdmin.from('objects').select('id,code,current_name'),
-    // Per-object закрытия в дату собрания на объектах собрания (см. WIKI 19_Сущность_Задача)
-    (meeting.object_ids?.length ?? 0) > 0
-      ? supabaseAdmin
-          .from('task_object_status')
-          .select('task_id, object_id, status, done_date, done_note')
-          .in('object_id', meeting.object_ids)
-          .in('status', ['done', 'closed'])
-          .eq('done_date', meeting.meeting_date)
-      : Promise.resolve({ data: [], error: null }),
+    loadResolutions({
+      meetingId: id,
+      meetingDate: meeting.meeting_date,
+      objectIds: meeting.object_ids ?? [],
+    }),
   ])
 
   const objectsById = new Map<string, string>()
@@ -108,50 +108,72 @@ export async function POST(
   }
   const tasks = (tasksRes.data ?? []) as TaskRow[]
 
-  // Per-object closures
-  type ClosedJunction = { task_id: string; object_id: string; status: string; done_date: string; done_note: string | null }
-  const closedJunction = (closedTosRes.data ?? []) as ClosedJunction[]
-  const closedTaskIds = new Set(closedJunction.map((r) => r.task_id))
-  const doneNoteByTaskId = new Map<string, string | null>()
-  for (const r of closedJunction) {
-    if (r.done_note && !doneNoteByTaskId.has(r.task_id)) {
-      doneNoteByTaskId.set(r.task_id, r.done_note)
-    }
-  }
+  // Все закрытия в окне (с источником по entity_links).
+  // Уникальные task_id (одна задача могла закрыться по нескольким объектам).
+  const closures: ClosureRow[] = resolutions.closures
+  const closedTaskIds = new Set(closures.map((c) => c.task_id))
 
-  // Задачи прошлых собраний, закрытые сегодня (через junction)
+  // Подгружаем мета задач, которые закрылись в окне но НЕ принадлежат
+  // текущему собранию (legacy «закрытия задач прошлых собраний»).
   const externalClosedIds = [...closedTaskIds].filter(
     (taskId) => !tasks.some((t) => t.id === taskId),
   )
-  let externalClosed: TaskRow[] = []
+  let externalTasks: TaskRow[] = []
   if (externalClosedIds.length > 0) {
     const ext = await supabaseAdmin
       .from('tasks')
-      .select('id,title,explanation,status,assignee_org,due_date,done_note')
+      .select('id,code,title,explanation,status,assignee_org,due_date,done_note')
       .in('id', externalClosedIds)
-    externalClosed = ((ext.data ?? []) as TaskRow[])
+    externalTasks = ((ext.data ?? []) as TaskRow[])
   }
 
-  const myDoneTasks = tasks.filter(
-    (t) => closedTaskIds.has(t.id) || t.status === 'done' || t.status === 'closed',
-  )
-  const allDone: TaskRow[] = [...externalClosed, ...myDoneTasks].map((t) => ({
-    ...t,
-    done_note: doneNoteByTaskId.get(t.id) ?? t.done_note,
-  }))
+  // Объединяем для удобства lookup'а
+  const taskById = new Map<string, TaskRow>()
+  for (const t of tasks) taskById.set(t.id, t)
+  for (const t of externalTasks) taskById.set(t.id, t)
+
+  // Группируем закрытия по источнику (для prompt'а LLM)
+  type DoneItem = {
+    task: TaskRow
+    source: ClosureRow['source']
+    source_title: string | null
+    source_date: string | null
+    done_note: string | null
+  }
+  const doneItems: DoneItem[] = []
+  const seenTaskPerSource = new Set<string>()  // task × source — чтобы не дублировать одну задачу 4 раза если она закрылась на 4 объектах одним источником
+  for (const c of closures) {
+    const t = taskById.get(c.task_id)
+    if (!t) continue
+    const key = `${c.task_id}|${c.source}`
+    if (seenTaskPerSource.has(key)) continue
+    seenTaskPerSource.add(key)
+    doneItems.push({
+      task: t,
+      source: c.source,
+      source_title: c.source_title,
+      source_date: c.source_date,
+      done_note: c.done_note,
+    })
+  }
+
+  // Открытые задачи этого собрания — без изменений
   const open = tasks.filter(
     (t) => !closedTaskIds.has(t.id) && t.status !== 'done' && t.status !== 'closed' && t.status !== 'cancelled',
   )
 
-  // Промпт LLM
+  // Промпт LLM. doneItems сгруппированы по источнику закрытия:
+  // on_meeting / reported / by_document / by_letter / by_other / unsourced.
   const prompt = buildPrompt({
     code: meeting.code,
     dateLabel: ddmmyyyy(meeting.meeting_date),
     title: meeting.title,
     objectsLine,
     topics,
-    done: allDone,
+    doneItems,
     open,
+    windowStart: resolutions.window_start,
+    prevMeetingDate: resolutions.prev_meeting_date,
   })
 
   // LLM вызов
@@ -174,24 +196,38 @@ export async function POST(
   return NextResponse.json({ summary_md: summaryMd })
 }
 
+type DoneItemForPrompt = {
+  task: { title: string; explanation: string | null; assignee_org?: string | null }
+  source: ClosureRow['source']
+  source_title: string | null
+  source_date: string | null
+  done_note: string | null
+}
+
+const SOURCE_LABEL: Record<ClosureRow['source'], string> = {
+  on_meeting:  'Закрыто на этом собрании',
+  reported:    'Отчитано исполнителем до собрания',
+  by_document: 'Подтверждено документом',
+  by_letter:   'Закрыто по переписке',
+  by_other:    'Закрыто (иной источник)',
+  unsourced:   'Закрыто без явного источника (legacy)',
+}
+
 function buildPrompt(args: {
   code: string | null
   dateLabel: string
   title: string
   objectsLine: string
   topics: Array<{ title: string; content: string; raised_by_org: string | null }>
-  done: Array<{
-    title: string
-    explanation: string | null
-    assignee_org?: string | null
-    done_note: string | null
-  }>
+  doneItems: DoneItemForPrompt[]
   open: Array<{
     title: string
     explanation: string | null
     assignee_org: string | null
     due_date: string | null
   }>
+  windowStart: string
+  prevMeetingDate: string | null
 }): string {
   const topicsBlock =
     args.topics.length > 0
@@ -203,15 +239,25 @@ function buildPrompt(args: {
           .join('\n')
       : '— нет —'
 
-  const doneBlock =
-    args.done.length > 0
-      ? args.done
-          .map((t, i) => {
-            const note = t.done_note ? ` [подтверждение: ${t.done_note}]` : ''
-            return `${i + 1}. ${t.title}${note}\n   ${(t.explanation || '').replace(/\n/g, ' ')}`
-          })
-          .join('\n')
-      : '— нет —'
+  // ВЫПОЛНЕНО — группируем по source
+  const groups: Array<{ key: ClosureRow['source']; items: DoneItemForPrompt[] }> = []
+  const sourceOrder: ClosureRow['source'][] = ['on_meeting', 'reported', 'by_document', 'by_letter', 'by_other', 'unsourced']
+  for (const k of sourceOrder) {
+    const items = args.doneItems.filter((d) => d.source === k)
+    if (items.length > 0) groups.push({ key: k, items })
+  }
+
+  const doneBlock = groups.length === 0
+    ? '— нет —'
+    : groups.map((g) => {
+        const head = `[${SOURCE_LABEL[g.key]}]`
+        const body = g.items.map((d, i) => {
+          const src = d.source_title ? ` — источник: ${d.source_title}${d.source_date ? ` от ${d.source_date}` : ''}` : ''
+          const note = d.done_note ? ` [подтверждение: ${d.done_note}]` : ''
+          return `${i + 1}. ${d.task.title}${src}${note}\n   ${(d.task.explanation || '').replace(/\n/g, ' ')}`
+        }).join('\n')
+        return `${head}\n${body}`
+      }).join('\n\n')
 
   const openBlock =
     args.open.length > 0
@@ -237,7 +283,7 @@ function buildPrompt(args: {
 ОБСУДИЛИ (темы без задач):
 ${topicsBlock}
 
-ВЫПОЛНЕНО (закрытые на собрании задачи + закрытые задачи прошлых собраний):
+ВЫПОЛНЕНО — все закрытия с ${args.prevMeetingDate ? `предыдущего собрания (${args.prevMeetingDate})` : `${args.windowStart}`} до сегодня, по объектам собрания, СГРУППИРОВАННЫЕ ПО ИСТОЧНИКУ:
 ${doneBlock}
 
 К ИСПОЛНЕНИЮ (открытые задачи этого собрания):
@@ -262,8 +308,11 @@ ${openBlock}
   Если темы пусты — раздел опускается полностью.
 
 ## Выполнено
-- По одному bullet на каждый закрытый пункт. Формулируй кратко: «Что сделано — кем (если известно)».
-  Если пусто — пиши «— на этом собрании ничего не закрывалось».
+- Сгруппируй закрытия по тем же категориям источника, что в исходных данных
+  (заголовок группы выделяй жирным). Внутри группы — по одному bullet на пункт:
+  «Что сделано — источник (если есть)».
+- Группы пустыми пропускай.
+- Если ВСЕХ закрытий нет — пиши «— за период между собраниями ничего не закрывалось».
 
 ## К исполнению
 - По одному bullet на каждую открытую задачу: «Задача — отв (срок DD.MM.YYYY)».

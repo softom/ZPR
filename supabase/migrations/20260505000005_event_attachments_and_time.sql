@@ -1,7 +1,7 @@
 -- ============================================================
 -- event_attachments + events.event_time
 -- ============================================================
--- Зеркало meeting_attachments. Связь по UUID (см. WIKI 20_Правило_связей).
+-- Зеркало meeting_attachments. Связь по UUID (см. WIKI 09_Правило_связей).
 -- Файлы хранятся в STORAGE_DIR/СОБЫТИЯ/{YYYY}/{MM}/{event_id}/.
 
 create table event_attachments (

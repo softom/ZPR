@@ -5,9 +5,13 @@
  *
  * Шаги:
  *   1. Upload   — drag&drop файла, чтение текста pdfjs, autostart analyze.
- *   2. Analyze  — spinner, POST /api/contracts/v2/analyze.
- *   3. Verify   — три табы (Стороны, Объекты, Пункты), inline-правка.
+ *   2. Analyze  — spinner, POST /api/contracts/v2/analyze (только метаданные).
+ *   3. Verify   — две табы (Стороны, Объекты), inline-правка.
  *   4. Confirm  — сводка, POST /save → POST /[id]/upload → редирект /[id].
+ *
+ * Этапы и пункты договора выделяются ОТДЕЛЬНО, уже в карточке договора:
+ *   - кнопка «🎯 Выделить этапы»             (POST /extract-stages)
+ *   - кнопка «🎯 Выделить события договора»  (POST /reparse skip_stages + /clauses/replace preserve_stages)
  */
 
 import { useEffect, useMemo, useState, type CSSProperties } from 'react'
@@ -45,7 +49,7 @@ const CATEGORY_BADGE_CLASS: Record<ClauseCategory, string> = Object.fromEntries(
 ) as Record<ClauseCategory, string>
 
 type Step = 'upload' | 'analyze' | 'verify' | 'confirm'
-type VerifyTab = 'parties' | 'objects' | 'clauses'
+type VerifyTab = 'parties' | 'objects'
 
 interface ObjectOption {
   code: string
@@ -256,13 +260,13 @@ export default function NewContractPage() {
       {step === 'verify' && analysis && (
         <>
           <div className="flex gap-2 mb-4 border-b">
-            {(['parties', 'objects', 'clauses'] as VerifyTab[]).map(t => (
+            {(['parties', 'objects'] as VerifyTab[]).map(t => (
               <button
                 key={t}
                 onClick={() => setVerifyTab(t)}
                 className={`px-4 py-2 border-b-2 ${verifyTab === t ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-600'}`}
               >
-                {t === 'parties' ? 'Стороны' : t === 'objects' ? 'Объекты' : `Пункты (${analysis.clauses.length})`}
+                {t === 'parties' ? 'Стороны' : 'Объекты'}
               </button>
             ))}
           </div>
@@ -280,14 +284,6 @@ export default function NewContractPage() {
               all={allObjects}
               selected={selectedObjectCodes}
               onChange={setSelectedObjectCodes}
-            />
-          )}
-
-          {verifyTab === 'clauses' && (
-            <ClausesPanel
-              clauses={analysis.clauses}
-              signedDate={analysis.signed_date}
-              onChange={cl => setAnalysis({ ...analysis, clauses: cl })}
             />
           )}
 
@@ -874,13 +870,18 @@ function ConfirmStep({
           <div><span className="text-gray-500">Заказчик: </span>{analysis.customer.name} (ИНН {analysis.customer.inn})</div>
           <div><span className="text-gray-500">Подрядчик: </span>{analysis.contractor.name} (ИНН {analysis.contractor.inn})</div>
           <div className="col-span-2"><span className="text-gray-500">Объекты: </span>{objects.join(', ') || '—'}</div>
-          <div className="col-span-2"><span className="text-gray-500">Пунктов договора: </span>{analysis.clauses.length}</div>
         </div>
       </div>
 
-      <div className="text-sm text-gray-600">
-        После сохранения: создаются записи в БД, файл копируется в <code>ЗПР_Хранилище\ДОГОВОРА\</code>,
-        запускается векторная индексация. Перейдём на страницу договора для дальнейшей правки пунктов.
+      <div className="text-sm text-gray-600 space-y-1">
+        <div>
+          После сохранения: создаются записи в БД (договор + стороны + объекты),
+          файл копируется в <code>ЗПР_Хранилище\ДОГОВОРА\</code>, запускается векторная индексация.
+        </div>
+        <div className="text-gray-500">
+          На странице договора будут доступны кнопки <span className="font-semibold">«🎯 Выделить этапы»</span> и
+          <span className="font-semibold"> «🎯 Выделить события договора»</span> для последующего LLM-разбора.
+        </div>
       </div>
 
       <div className="flex justify-end gap-2">

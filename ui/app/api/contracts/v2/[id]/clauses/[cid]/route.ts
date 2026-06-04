@@ -13,7 +13,11 @@ const ALLOWED = new Set([
   'term_days', 'term_type', 'term_base', 'term_text',
   'term_ref_clause_id',
   'date_mode',
-  'category',
+  'category',                  // legacy denorm; теперь синкается триггером из event_type_id, но оператор может ставить вручную для совместимости
+  'event_type_id',             // FK → contract_event_types.id
+  'date_source',               // 'contract' | 'edited' | 'computed'
+  'date_change_event_id',      // FK → events.id — событие-причина смены даты
+  'stage_id',                  // FK → contract_stages.id — привязка к этапу
 ])
 
 export async function PATCH(

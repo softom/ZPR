@@ -50,7 +50,7 @@ export async function POST(
   // Контекст: имена объектов + подрядчик
   const { data: ev } = await supabaseAdmin
     .from('events')
-    .select('id, title, note, object_ids, fact_date, date_end')
+    .select('id, title, note, object_ids, date_end')
     .eq('id', id)
     .maybeSingle()
   if (!ev) return NextResponse.json({ error: 'Событие не найдено' }, { status: 404 })

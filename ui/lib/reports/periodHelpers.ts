@@ -2,9 +2,9 @@
 // week  = пн-вс, 7 дней. period_start = понедельник, period_end = воскресенье.
 // month = 1-е по последнее число календарного месяца.
 
-export type PeriodType = 'week' | 'month'
+export type PeriodType = 'week' | 'month' | 'control'
 
-// Снэп даты к началу периода: пн (для week) или 1-е число месяца.
+// Снэп даты к началу периода: пн (для week), 1-е число (month) или сама дата (control).
 export function snapToPeriodStart(date: Date | string, periodType: PeriodType): Date {
   const d = new Date(date)
   d.setHours(0, 0, 0, 0)
@@ -14,12 +14,16 @@ export function snapToPeriodStart(date: Date | string, periodType: PeriodType): 
     d.setDate(d.getDate() - (day - 1))
     return d
   }
-  // month: 1-е число
-  d.setDate(1)
+  if (periodType === 'month') {
+    d.setDate(1)
+    return d
+  }
+  // control: snapshot — period_start = сама дата (без снапа)
   return d
 }
 
 // Конец периода (последний день — включительно).
+// Для control — period_end совпадает с period_start (это snapshot, не диапазон).
 export function periodEnd(start: Date | string, periodType: PeriodType): Date {
   const d = new Date(start)
   d.setHours(0, 0, 0, 0)
@@ -27,11 +31,14 @@ export function periodEnd(start: Date | string, periodType: PeriodType): Date {
     d.setDate(d.getDate() + 6)
     return d
   }
-  // month: последний день месяца — день 0 следующего месяца
-  const next = new Date(d)
-  next.setMonth(next.getMonth() + 1, 1)
-  next.setDate(0)
-  return next
+  if (periodType === 'month') {
+    const next = new Date(d)
+    next.setMonth(next.getMonth() + 1, 1)
+    next.setDate(0)
+    return next
+  }
+  // control: end = start
+  return d
 }
 
 // Длина периода в днях (вкл. границы).
@@ -62,14 +69,21 @@ export function formatPeriodTitle(start: Date, end: Date, periodType: PeriodType
   if (periodType === 'week') {
     return `Неделя ${fmt(start)} — ${fmt(end)}`
   }
-  // month: "Январь 2026"
-  const monthName = start.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })
-  return monthName.charAt(0).toUpperCase() + monthName.slice(1)
+  if (periodType === 'month') {
+    // month: "Январь 2026"
+    const monthName = start.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })
+    return monthName.charAt(0).toUpperCase() + monthName.slice(1)
+  }
+  // control: "Справка ТЗ на 14 мая 2026"
+  return `Справка ТЗ на ${fmt(start)}`
 }
 
 // Тип отчёта в форме прилагательного для титула: «Отчёт еженедельный …».
 export function periodKindWord(periodType: PeriodType): string {
-  return periodType === 'week' ? 'еженедельный' : 'ежемесячный'
+  if (periodType === 'week') return 'еженедельный'
+  if (periodType === 'month') return 'ежемесячный'
+  // control: используется как «Справка ТЗ» — отдельный кейс в рендере
+  return 'справка ТЗ'
 }
 
 // Фраза периода для расширенного титула:
@@ -90,6 +104,13 @@ export function formatPeriodPhrase(start: Date, end: Date, periodType: PeriodTyp
   if (periodType === 'month') {
     const m = MONTHS_NOMINATIVE[start.getMonth()]
     return `${m} ${start.getFullYear()} года`
+  }
+  if (periodType === 'control') {
+    // control: snapshot — "на 14 мая 2026 года"
+    const sd = start.getDate()
+    const sm = MONTHS_GENITIVE[start.getMonth()]
+    const sy = start.getFullYear()
+    return `на ${sd} ${sm} ${sy} года`
   }
   // week: "с D[ M] по D M YYYY года"
   const sd = start.getDate()

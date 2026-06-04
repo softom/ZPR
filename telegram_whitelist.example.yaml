@@ -1,0 +1,23 @@
+# telegram_whitelist.yaml — список чатов, которые слушает telegram_listener.py
+#
+# Скопируй в telegram_whitelist.yaml (без .example) и заполни.
+# Файл с реальным whitelist в .gitignore.
+#
+# Каждая запись — либо явный chat_id, либо имя Telegram-папки (DialogFilter).
+# Папки удобнее: новые чаты, добавленные в папку, попадают в whitelist
+# автоматически при следующем запуске --listen / --backfill.
+#
+# Помощники:
+#   python telegram_listener.py --list-folders            # имена всех папок
+#   python telegram_listener.py --list-folder "Отели"    # чаты внутри папки
+#   python telegram_listener.py --list-dialogs            # все диалоги с chat_id
+
+chats:
+  # Вариант 1 — целая Telegram-папка
+  - folder:  "Отели"
+    handler: raw
+
+  # Вариант 2 — явный chat_id (если не хочется через папку)
+  # - title:   "Конкретный чат подрядчика"
+  #   chat_id: -1001234567890
+  #   handler: raw

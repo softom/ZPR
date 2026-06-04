@@ -83,13 +83,35 @@ def extract_text_pdf(path: Path) -> str:
     except Exception as e:
         print(f"  [PDF] pdfplumber ошибка {path.name}: {e}")
 
-    # Fallback: ABBYY OCR
+    # Fallback OCR: ocrmypdf (Linux/сервер) или ABBYY FineReader (Windows)
     txt_path = path.with_suffix(".txt")
     if txt_path.exists():
         return txt_path.read_text(encoding="utf-8", errors="ignore")
 
+    import shutil, tempfile
+    if shutil.which("ocrmypdf"):
+        print(f"  [OCR] ocrmypdf → {path.name}")
+        out_pdf = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                out_pdf = tmp.name
+            subprocess.run(
+                ["ocrmypdf", "-l", "rus+eng", "--force-ocr",
+                 "--sidecar", str(txt_path), str(path), out_pdf],
+                check=True, timeout=300,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if txt_path.exists():
+                return txt_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            print(f"  [OCR] ocrmypdf ошибка: {e}")
+        finally:
+            if out_pdf:
+                Path(out_pdf).unlink(missing_ok=True)
+        return ""
+
     if not Path(FINECMD_PATH).exists():
-        print(f"  [OCR] ABBYY не найден, пропускаем {path.name}")
+        print(f"  [OCR] OCR-движок не найден, пропускаем {path.name}")
         return ""
 
     print(f"  [OCR] ABBYY → {path.name}")

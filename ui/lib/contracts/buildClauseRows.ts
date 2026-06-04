@@ -46,7 +46,9 @@ export interface ClauseRow {
   term_ref_clause_id: string | null
   is_anchor:    boolean
   date_mode:    'date' | 'term' | null
-  category:     'fin' | 'work' | 'appr' | 'legal' | null
+  category:     'fin' | 'work' | 'term' | 'legal' | 'appr' | 'comm' | 'ctrl' | null
+  stage_id:     string | null  // FK на contract_stages.id (резолвится из stage_number в координаторе)
+  event_type_id: string | null // FK на contract_event_types.id (резолвится из event_type_code в координаторе)
 }
 
 /**
@@ -118,6 +120,8 @@ export function buildClauseRows(
       is_anchor:    true,
       date_mode:    'date', // якорь всегда фиксирован как 'date'
       category:     'legal', // дата заключения договора — юридический пункт
+      stage_id:     null,    // якорь не относится ни к какому этапу
+      event_type_id: null,   // резолвится координатором: legal_contract_sign
     })
   }
 
@@ -153,6 +157,8 @@ export function buildClauseRows(
       is_anchor:    false,
       date_mode:    c.date_mode ?? inferDateMode({ ...c, term_base: termBase }),
       category:     c.category ?? null,
+      stage_id:     null,         // резолвится координатором save/replace из stage_number
+      event_type_id: null,        // резолвится координатором из event_type_code
     })
   }
 

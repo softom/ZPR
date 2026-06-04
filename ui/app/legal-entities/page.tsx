@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { useRole } from '@/lib/useRole'
 import ContactFormModal, {
   ContactFormValues,
   EMPTY_CONTACT,
@@ -13,7 +14,7 @@ type LegalEntity = {
   inn: string | null
   kpp: string | null
   ogrn: string | null
-  address: string | null
+  address_legal: string | null
   signatory_name: string | null
   signatory_position: string | null
   aliases: string[]
@@ -35,18 +36,79 @@ type Contact = {
   notes: string | null
 }
 
+/**
+ * Нормализация для нечёткого сравнения имён: lowercase, убираем кавычки,
+ * скобки, точки, дефисы; множественные пробелы → один; trim.
+ * «ООО «Хэдс Групп»» → «ооо хэдс групп»
+ */
+function normalizeForMatch(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[«»"'`()[\].,\-—]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Возвращает до 5 похожих юр.лиц.
+ * Совпадение, если нормализованный input — подстрока нормализованного имени
+ * или любого алиаса, либо наоборот. Чем короче источник совпадения — тем выше ранг.
+ */
+function findSimilarEntities(
+  input: string,
+  items: LegalEntity[],
+  excludeId: string | null
+): LegalEntity[] {
+  const q = normalizeForMatch(input)
+  if (q.length < 3) return []
+  const matched: { item: LegalEntity; weight: number }[] = []
+  for (const item of items) {
+    if (excludeId && item.id === excludeId) continue
+    const name = normalizeForMatch(item.name)
+    const aliases = (item.aliases ?? []).map(normalizeForMatch)
+    const candidates = [name, ...aliases]
+    let best = -1
+    for (const c of candidates) {
+      if (!c) continue
+      if (c === q) {
+        best = Math.max(best, 100)
+      } else if (c.includes(q) || q.includes(c)) {
+        // короче совпадение — выше ранг
+        const shorter = Math.min(c.length, q.length)
+        const longer = Math.max(c.length, q.length)
+        best = Math.max(best, Math.round((shorter / longer) * 90))
+      }
+    }
+    if (best > 0) matched.push({ item, weight: best })
+  }
+  matched.sort((a, b) => b.weight - a.weight)
+  return matched.slice(0, 5).map((m) => m.item)
+}
+
+function friendlyError(e: { code?: string; message: string }): string {
+  const msg = e.message || ''
+  if (msg.includes('row-level security') || msg.includes('row level security')) {
+    return 'Нет прав на изменение справочника. Сессия могла истечь — выйдите и войдите снова (нужна роль uploader / admin).'
+  }
+  if (e.code === '23505' || msg.includes('unique')) {
+    return 'Запись с таким уникальным значением (ИНН?) уже существует.'
+  }
+  return msg
+}
+
 const EMPTY: Omit<LegalEntity, 'id' | 'created_at' | 'updated_at'> = {
   name: '',
   inn: '',
   kpp: '',
   ogrn: '',
-  address: '',
+  address_legal: '',
   signatory_name: '',
   signatory_position: '',
   aliases: [],
 }
 
 export default function LegalEntitiesPage() {
+  const { isUploader } = useRole()
   const [items, setItems] = useState<LegalEntity[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -62,6 +124,13 @@ export default function LegalEntitiesPage() {
     initial: ContactFormValues
     editingId: string | null
   } | null>(null)
+
+  // Похожие записи по имени — пересчитываем при каждом изменении form.name,
+  // показываем только когда модалка открыта и не сохраняемся
+  const similar = useMemo(
+    () => (creating || editing ? findSimilarEntities(form.name, items, editing?.id ?? null) : []),
+    [form.name, items, creating, editing]
+  )
 
   useEffect(() => {
     load()
@@ -186,7 +255,7 @@ export default function LegalEntitiesPage() {
       inn: item.inn ?? '',
       kpp: item.kpp ?? '',
       ogrn: item.ogrn ?? '',
-      address: item.address ?? '',
+      address_legal: item.address_legal ?? '',
       signatory_name: item.signatory_name ?? '',
       signatory_position: item.signatory_position ?? '',
       aliases: item.aliases ?? [],
@@ -227,7 +296,7 @@ export default function LegalEntitiesPage() {
       inn: form.inn?.trim() || null,
       kpp: form.kpp?.trim() || null,
       ogrn: form.ogrn?.trim() || null,
-      address: form.address?.trim() || null,
+      address_legal: form.address_legal?.trim() || null,
       signatory_name: form.signatory_name?.trim() || null,
       signatory_position: form.signatory_position?.trim() || null,
       aliases,
@@ -243,14 +312,16 @@ export default function LegalEntitiesPage() {
         .update(payload)
         .eq('id', editing.id)
       if (e) {
-        setError(e.message)
+        console.error('[legal-entities update]', e)
+        setError(friendlyError(e))
         setSaving(false)
         return
       }
     } else {
       const { error: e } = await supabase.from('legal_entities').insert(payload)
       if (e) {
-        setError(e.message)
+        console.error('[legal-entities insert]', e)
+        setError(friendlyError(e))
         setSaving(false)
         return
       }
@@ -286,12 +357,14 @@ export default function LegalEntitiesPage() {
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Юридические лица</h1>
-        <button
-          onClick={openCreate}
-          className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-        >
-          + Добавить
-        </button>
+        {isUploader && (
+          <button
+            onClick={openCreate}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          >
+            + Добавить
+          </button>
+        )}
       </div>
 
       {error && !editing && !creating && (
@@ -379,18 +452,22 @@ export default function LegalEntitiesPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => openEdit(it)}
-                      className="text-blue-600 hover:text-blue-800 mr-3"
-                    >
-                      Изменить
-                    </button>
-                    <button
-                      onClick={() => remove(it)}
-                      className="text-red-600 hover:text-red-800"
-                    >
-                      Удалить
-                    </button>
+                    {isUploader && (
+                      <>
+                        <button
+                          onClick={() => openEdit(it)}
+                          className="text-blue-600 hover:text-blue-800 mr-3"
+                        >
+                          Изменить
+                        </button>
+                        <button
+                          onClick={() => remove(it)}
+                          className="text-red-600 hover:text-red-800"
+                        >
+                          Удалить
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -422,11 +499,6 @@ export default function LegalEntitiesPage() {
               </h2>
             </div>
             <div className="p-6 space-y-4">
-              {error && (
-                <div className="p-3 bg-red-50 text-red-700 border border-red-200 rounded text-sm">
-                  {error}
-                </div>
-              )}
               <Field
                 label="Название *"
                 value={form.name}
@@ -434,6 +506,34 @@ export default function LegalEntitiesPage() {
                 placeholder="ООО «...»"
                 hint="Официальное название как в реквизитах/договоре"
               />
+              {similar.length > 0 && (
+                <div className="-mt-2 p-3 bg-amber-50 border border-amber-200 rounded text-sm">
+                  <div className="font-medium text-amber-900 mb-1.5">
+                    Возможно, такая запись уже есть — проверьте, не дубль ли:
+                  </div>
+                  <ul className="space-y-1">
+                    {similar.map((s) => (
+                      <li key={s.id} className="flex items-start gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openEdit(s)}
+                          className="text-blue-700 hover:text-blue-900 hover:underline text-left"
+                          title="Открыть существующую карточку"
+                        >
+                          {s.name}
+                        </button>
+                        <span className="text-xs text-gray-500 mt-0.5">
+                          {s.inn ? <span className="font-mono">ИНН {s.inn}</span> : 'без ИНН'}
+                          {s.signatory_name ? ` · ${s.signatory_name}` : ''}
+                          {s.aliases && s.aliases.length > 0
+                            ? ` · алиасы: ${s.aliases.slice(0, 3).join(', ')}${s.aliases.length > 3 ? '…' : ''}`
+                            : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Альтернативные названия
@@ -473,8 +573,8 @@ export default function LegalEntitiesPage() {
               </div>
               <Field
                 label="Адрес"
-                value={form.address || ''}
-                onChange={(v) => setForm({ ...form, address: v })}
+                value={form.address_legal || ''}
+                onChange={(v) => setForm({ ...form, address_legal: v })}
                 placeholder="Юридический адрес"
                 multiline
               />
@@ -499,12 +599,14 @@ export default function LegalEntitiesPage() {
                     <h3 className="text-sm font-semibold text-gray-700">
                       Контакты ({contacts.length})
                     </h3>
-                    <button
-                      onClick={openCreateContact}
-                      className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
-                    >
-                      + Добавить контакт
-                    </button>
+                    {isUploader && (
+                      <button
+                        onClick={openCreateContact}
+                        className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+                      >
+                        + Добавить контакт
+                      </button>
+                    )}
                   </div>
                   {contactsLoading ? (
                     <div className="text-sm text-gray-500">Загрузка контактов…</div>
@@ -522,7 +624,7 @@ export default function LegalEntitiesPage() {
                             <th className="px-3 py-2">Должность</th>
                             <th className="px-3 py-2">Email</th>
                             <th className="px-3 py-2">Телефон</th>
-                            <th className="px-3 py-2"></th>
+                            {isUploader && <th className="px-3 py-2"></th>}
                           </tr>
                         </thead>
                         <tbody>
@@ -547,29 +649,31 @@ export default function LegalEntitiesPage() {
                                 <td className="px-3 py-2 text-gray-600 font-mono text-xs">
                                   {c.phone || '—'}
                                 </td>
-                                <td className="px-3 py-2 text-right whitespace-nowrap">
-                                  <button
-                                    onClick={() => openEditContact(c)}
-                                    className="text-blue-600 hover:text-blue-800 text-xs mr-2"
-                                  >
-                                    Изменить
-                                  </button>
-                                  {c.is_active ? (
+                                {isUploader && (
+                                  <td className="px-3 py-2 text-right whitespace-nowrap">
                                     <button
-                                      onClick={() => deactivateContact(c)}
-                                      className="text-gray-500 hover:text-gray-700 text-xs"
+                                      onClick={() => openEditContact(c)}
+                                      className="text-blue-600 hover:text-blue-800 text-xs mr-2"
                                     >
-                                      Деактивировать
+                                      Изменить
                                     </button>
-                                  ) : (
-                                    <button
-                                      onClick={() => activateContact(c)}
-                                      className="text-green-600 hover:text-green-800 text-xs"
-                                    >
-                                      Активировать
-                                    </button>
-                                  )}
-                                </td>
+                                    {c.is_active ? (
+                                      <button
+                                        onClick={() => deactivateContact(c)}
+                                        className="text-gray-500 hover:text-gray-700 text-xs"
+                                      >
+                                        Деактивировать
+                                      </button>
+                                    ) : (
+                                      <button
+                                        onClick={() => activateContact(c)}
+                                        className="text-green-600 hover:text-green-800 text-xs"
+                                      >
+                                        Активировать
+                                      </button>
+                                    )}
+                                  </td>
+                                )}
                               </tr>
                             )
                           })}
@@ -580,21 +684,28 @@ export default function LegalEntitiesPage() {
                 </div>
               )}
             </div>
-            <div className="p-6 border-t bg-gray-50 flex justify-end gap-3">
-              <button
-                onClick={close}
-                disabled={saving}
-                className="px-4 py-2 bg-white border rounded hover:bg-gray-50 disabled:opacity-50"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={save}
-                disabled={saving}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-              >
-                {saving ? 'Сохранение…' : 'Сохранить'}
-              </button>
+            <div className="p-6 border-t bg-gray-50">
+              {error && (
+                <div className="p-3 mb-3 bg-red-50 text-red-700 border border-red-200 rounded text-sm">
+                  {error}
+                </div>
+              )}
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={close}
+                  disabled={saving}
+                  className="px-4 py-2 bg-white border rounded hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Отмена
+                </button>
+                <button
+                  onClick={save}
+                  disabled={saving}
+                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {saving ? 'Сохранение…' : 'Сохранить'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

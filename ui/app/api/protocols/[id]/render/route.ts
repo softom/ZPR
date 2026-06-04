@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase-admin'
+import { loadResolutions } from '@/lib/protocol/loadResolutions'
 import { generateProtocolDocx } from '@/lib/protocol/generateDocx'
 import { generateSummaryDocx } from '@/lib/protocol/generateSummaryDocx'
 
@@ -117,7 +118,10 @@ export async function GET(
     code: string | null
   }
 
-  const [leRes, partsRes, topicsRes, tasksRes, objectsRes, closedTosRes] = await Promise.all([
+  // Раздел «ПРИНЯЛИ КАК РЕШЁННЫЕ» — теперь по новой модели жизненного цикла:
+  // окно от предыдущего собрания + per-object закрытия с источником.
+  // См. lib/protocol/loadResolutions и WIKI 19_Сущность_Задача «v2.4».
+  const [leRes, partsRes, topicsRes, tasksRes, objectsRes, resolutions] = await Promise.all([
     supabaseAdmin
       .from('meeting_legal_entities')
       .select('legal_entity_id, seq, legal_entities(id,name)')
@@ -141,17 +145,11 @@ export async function GET(
       .eq('meeting_id', id)
       .order('code'),
     supabaseAdmin.from('objects').select('id,code,current_name'),
-    // Per-object закрытия: junction-строки в дату этого собрания
-    // на объектах этого собрания. Задача попадает в «ПРИНЯЛИ КАК РЕШЁННЫЕ»
-    // если хотя бы на одном из объектов собрания она done/closed в дату собрания.
-    (meeting.object_ids?.length ?? 0) > 0
-      ? supabaseAdmin
-          .from('task_object_status')
-          .select('task_id, object_id, status, done_date, done_note')
-          .in('object_id', meeting.object_ids)
-          .in('status', ['done', 'closed'])
-          .eq('done_date', meeting.meeting_date)
-      : Promise.resolve({ data: [], error: null }),
+    loadResolutions({
+      meetingId: id,
+      meetingDate: meeting.meeting_date,
+      objectIds: meeting.object_ids ?? [],
+    }),
   ])
 
   if (meeting.status !== 'approved' && meeting.status !== 'protocoled') {
@@ -220,19 +218,25 @@ export async function GET(
   }
   const tasks = (tasksRes.data ?? []) as RenderedTask[]
 
-  // Per-object закрытия: junction-строки (task_id, object_id) closed в дату собрания.
-  type ClosedJunction = { task_id: string; object_id: string; status: string; done_date: string; done_note: string | null }
-  const closedJunction = (closedTosRes.data ?? []) as ClosedJunction[]
-  const closedTaskIds = new Set(closedJunction.map((r) => r.task_id))
-  // done_note приоритет: junction-строка (per-object closure) → tasks.done_note
-  const doneNoteByTaskId = new Map<string, string | null>()
-  for (const r of closedJunction) {
-    if (r.done_note && !doneNoteByTaskId.has(r.task_id)) {
-      doneNoteByTaskId.set(r.task_id, r.done_note)
+  // Закрытия в окне «от предыдущего собрания до текущего», обогащённые источником.
+  // Уникальные task_id (одна задача могла закрыться по нескольким объектам).
+  const closures = resolutions.closures
+  const closedTaskIds = new Set(closures.map((c) => c.task_id))
+  // done_note и source для display'я: одна запись на task_id × source (без дублей по объектам)
+  type DoneTaskMeta = { done_note: string | null; source: typeof closures[number]['source']; source_title: string | null; source_date: string | null }
+  const metaByTaskId = new Map<string, DoneTaskMeta>()
+  for (const c of closures) {
+    if (!metaByTaskId.has(c.task_id)) {
+      metaByTaskId.set(c.task_id, {
+        done_note: c.done_note,
+        source: c.source,
+        source_title: c.source_title,
+        source_date: c.source_date,
+      })
     }
   }
 
-  // Задачи прошлых собраний (не из tasksRes), закрытые здесь — подгружаем по task_id из junction
+  // Задачи прошлых собраний (не из tasksRes), закрытые в окне — подгружаем
   const externalClosedIds = [...closedTaskIds].filter(
     (taskId) => !tasks.some((t) => t.id === taskId),
   )
@@ -245,14 +249,13 @@ export async function GET(
     externalClosed = ((ext.data ?? []) as RenderedTask[])
   }
 
-  // Задача попадает в «ПРИНЯЛИ» если её id в closedTaskIds (per-object закрытие в дату собрания)
-  // ИЛИ агрегатный статус done/closed для задач этого собрания.
+  // ПРИНЯЛИ КАК РЕШЁННЫЕ — все задачи закрытые в окне (вне зависимости от источника)
   const myDoneTasks = tasks.filter(
     (t) => closedTaskIds.has(t.id) || t.status === 'done' || t.status === 'closed',
   )
   const acceptedAsDone: RenderedTask[] = [...externalClosed, ...myDoneTasks].map((t) => ({
     ...t,
-    done_note: doneNoteByTaskId.get(t.id) ?? t.done_note,
+    done_note: metaByTaskId.get(t.id)?.done_note ?? t.done_note,
   }))
 
   // «РЕШИЛИ» — задачи этого собрания, не попавшие в «ПРИНЯЛИ»

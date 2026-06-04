@@ -29,16 +29,16 @@ export async function POST(
 ) {
   const { id } = await ctx.params
 
-  // Получаем событие — нужен fact_date или date_end для пути в YYYY/MM
+  // Получаем событие — нужна date_end для пути в YYYY/MM
   const { data: ev, error: evErr } = await supabaseAdmin
     .from('events')
-    .select('id, fact_date, date_end, date_start')
+    .select('id, date_end, date_start')
     .eq('id', id)
     .maybeSingle()
   if (evErr || !ev) {
     return NextResponse.json({ error: evErr?.message || 'Событие не найдено' }, { status: 404 })
   }
-  const refDate: string = ev.fact_date || ev.date_end || ev.date_start || new Date().toISOString().slice(0, 10)
+  const refDate: string = ev.date_end || ev.date_start || new Date().toISOString().slice(0, 10)
 
   const formData = await request.formData()
   const file = formData.get('file') as File | null

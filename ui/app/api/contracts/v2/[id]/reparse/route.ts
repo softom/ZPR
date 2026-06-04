@@ -1,14 +1,22 @@
 /**
  * POST /api/contracts/v2/[id]/reparse
  *
- * Повторный разбор пунктов договора через LLM. Источник текста (по приоритету):
+ * Body: { skip_stages?: boolean }
+ *
+ * Повторный разбор договора через LLM. Источник текста (по приоритету):
  *   1. `documents.extracted_text` — кэш из БД (если был сохранён при загрузке).
  *   2. Файл договора из хранилища (`STORAGE_DIR + documents.folder_path` → первый PDF).
  *      После извлечения — текст кэшируется в `documents.extracted_text` для будущих вызовов.
  *
- * Возвращает только список clauses — без записи в БД.
- * Запись происходит отдельным POST /api/contracts/v2/[id]/clauses/replace,
- * чтобы оператор мог принять решение перед заменой существующих пунктов.
+ * Режимы:
+ *   - default (skip_stages=false): два прохода LLM — этапы (extractContractStages),
+ *     потом пункты (extractContractClauses со stage_number). Возвращает { stages, clauses }.
+ *   - skip_stages=true: использует существующие contract_stages из БД, выполняет
+ *     только LLM-проход 2 (пункты). Возвращает { stages: <из БД>, clauses }.
+ *     Этот режим вызывает кнопка «🎯 Выделить события договора».
+ *
+ * Возвращает только данные — без записи в БД.
+ * Запись происходит отдельным POST /api/contracts/v2/[id]/clauses/replace.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -18,16 +26,27 @@ import {
   extractContractClauses,
   type ObjectInfo,
   type ProjectStage,
+  type ContractEventTypeInfo,
 } from '@/lib/parser/extractClauses'
+import { extractContractStages, type ContractStageInfo } from '@/lib/parser/extractContractStages'
 import { findContractFile } from '@/lib/contracts/findContractFile'
 import { extractTextFromPdfBuffer } from '@/lib/pdf/extractServer'
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params
+
+    // Тело опциональное (старые клиенты вызывают без body)
+    let skipStages = false
+    try {
+      const body = await request.json() as { skip_stages?: boolean } | null
+      skipStages = body?.skip_stages === true
+    } catch {
+      // empty body — обычный режим
+    }
 
     const { data: doc, error: dErr } = await supabaseAdmin
       .from('documents')
@@ -83,7 +102,7 @@ export async function POST(
     }
 
     // Шаг 3: справочники для контекста LLM
-    const [{ data: objects }, { data: stages }] = await Promise.all([
+    const [{ data: objects }, { data: stages }, { data: eventTypes }] = await Promise.all([
       supabaseAdmin
         .from('objects')
         .select('code,current_name,contractor,aliases')
@@ -92,13 +111,36 @@ export async function POST(
         .from('project_stages')
         .select('code,label,sort_order')
         .order('sort_order'),
+      supabaseAdmin
+        .from('contract_event_types')
+        .select('code,category,label,is_intermediate,is_anchor')
+        .eq('is_active', true)
+        .order('sort_order'),
     ])
 
-    // Шаг 4: LLM
+    // Шаг 4a: LLM-проход 1 — этапы (или используем существующие из БД)
+    let contractStages: ContractStageInfo[]
+    if (skipStages) {
+      const { data: dbStages, error: csErr } = await supabaseAdmin
+        .from('contract_stages')
+        .select('stage_number, stage_name, description, sort_order, source_page, source_quote')
+        .eq('document_id', id)
+        .order('sort_order', { ascending: true })
+      if (csErr) return NextResponse.json({ error: csErr.message }, { status: 500 })
+      contractStages = (dbStages ?? []) as ContractStageInfo[]
+      console.log(`[v2/reparse] doc=${id} skip_stages=true, используем ${contractStages.length} этапов из БД`)
+    } else {
+      contractStages = await extractContractStages(text)
+      console.log(`[v2/reparse] doc=${id} stages извлечено: ${contractStages.length}`)
+    }
+
+    // Шаг 4b: LLM-проход 2 — clauses с привязкой к stage_number
     const analysis = await extractContractClauses(
       text,
       (objects ?? []) as ObjectInfo[],
       (stages ?? []) as ProjectStage[],
+      contractStages,
+      (eventTypes ?? []) as ContractEventTypeInfo[],
     )
 
     // Шаг 5: если в БД нет signed_date, а LLM нашёл — обновим documents.signed_date.
@@ -112,6 +154,7 @@ export async function POST(
     }
 
     return NextResponse.json({
+      stages: contractStages,
       clauses: analysis.clauses ?? [],
       signed_date: analysis.signed_date ?? doc.signed_date,
     })

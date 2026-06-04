@@ -2,7 +2,7 @@
 -- meeting_topics + meetings: связь с объектами по UUID
 -- ============================================================
 -- Доводим до конца переход с object_codes (text) на object_ids (uuid),
--- начатый в 20260504000001_tasks_object_ids.sql. См. WIKI 20_Правило_связей.
+-- начатый в 20260504000001_tasks_object_ids.sql. См. WIKI 09_Правило_связей.
 
 -- ─── meeting_topics.object_ids ──────────────────────────────────────────
 alter table meeting_topics

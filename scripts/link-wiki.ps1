@@ -16,7 +16,9 @@
 # Requires: the WIKI source folder to exist (synced via Dropbox/remotely-save).
 
 param(
-    [string]$Source = 'D:\Dropbox\Приложения\remotely-save\Золотые Пески России\MD WIKI',
+    # WIKI поднят на корень remotely-save vault (2026-06-04): сам vault и есть WIKI.
+    # Junction по-прежнему называется `MD WIKI`, поэтому относительные пути `MD WIKI/...` работают.
+    [string]$Source = 'D:\Dropbox\Приложения\remotely-save\Золотые Пески России',
     [switch]$ThisOnly
 )
 

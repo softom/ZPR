@@ -24,19 +24,41 @@ export async function PATCH(
     return NextResponse.json({ error: 'Финализированный отчёт нельзя править' }, { status: 409 })
   }
 
-  // 6 контентных полей секции (см. lib/reports/generateSection.ts → REPORT_FIELDS)
+  // Текстовые поля: 6 для week/month, 3 для control
   const update: Record<string, string | null> = {}
-  for (const k of [
-    'project_movement',
-    'achievements',
-    'achievements_list',
-    'next_period_tasks',
-    'next_period_tasks_list',
-    'risks',
-  ]) {
+  const STRING_FIELDS = [
+    // week/month:
+    'project_movement', 'achievements', 'achievements_list',
+    'next_period_tasks', 'next_period_tasks_list', 'risks',
+    // control:
+    'narrative', 'contract_summary', 'decisions',
+  ]
+  for (const k of STRING_FIELDS) {
     if (k in body) {
       const v = body[k]
       update[k] = (typeof v === 'string') ? v : (v == null ? null : String(v))
+    }
+  }
+  // priority_group (control) — enum 'priority' | 'secondary' | null
+  if ('priority_group' in body) {
+    const v = body.priority_group
+    if (v === 'priority' || v === 'secondary' || v === null) {
+      update.priority_group = v
+    } else if (v === '' || v === undefined) {
+      update.priority_group = null
+    } else {
+      return NextResponse.json({ error: 'priority_group должен быть priority | secondary | null' }, { status: 400 })
+    }
+  }
+  // tep_deadline (control) — date или null
+  if ('tep_deadline' in body) {
+    const v = body.tep_deadline
+    if (v === null || v === '') {
+      update.tep_deadline = null
+    } else if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      update.tep_deadline = v
+    } else {
+      return NextResponse.json({ error: 'tep_deadline должен быть YYYY-MM-DD или null' }, { status: 400 })
     }
   }
   if (Object.keys(update).length === 0) {

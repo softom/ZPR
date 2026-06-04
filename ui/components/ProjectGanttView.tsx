@@ -13,10 +13,10 @@ const EVENT_TYPE_ICON: Record<string, string> = {
 }
 
 type EventRow = DBEventForResolution & {
-  event_type: string
+  event_type: string         // entry_type из calendar_entries (renamed для совместимости с dateFormula)
   title: string | null
   stage_name: string | null
-  entity_id: string
+  entity_id: string          // document_id, резолвится через entity_links
 }
 
 type Props = {
@@ -42,14 +42,11 @@ export default function ProjectGanttView({
     async function load() {
       setLoading(true)
       try {
-        const sel = 'id,event_type,title,stage_name,stage_number,entity_id,date_end,date_start,date_mode,date_ref_event_id,date_ref_offset,date_ref_offset_type,exec_days,exec_type'
+        // После сплита 20260508* плановые/договорные вехи живут в calendar_entries.
+        // Связь с документом — через entity_links (from_type='calendar_entry' → to_type='document').
+        const sel = 'id,entry_type,title,stage_name,date_end,date_start,date_mode,date_ref_entry_id,date_ref_offset,date_ref_offset_type,exec_days,exec_type'
 
-        let evQ = supabase
-          .from('events')
-          .select(sel)
-          .eq('entity_type', 'document')
-          .order('entity_id', { ascending: true })
-        if (documentId) evQ = evQ.eq('entity_id', documentId)
+        const calQ = supabase.from('calendar_entries').select(sel)
 
         let docQ = supabase
           .from('documents')
@@ -58,9 +55,47 @@ export default function ProjectGanttView({
           .is('deleted_at', null)
         if (documentId) docQ = docQ.eq('id', documentId)
 
-        const [evRes, docRes] = await Promise.all([evQ, docQ])
+        // Маппинг calendar_entry → document_id из entity_links
+        const linksQ = supabase
+          .from('entity_links')
+          .select('from_id,to_id')
+          .eq('from_type', 'calendar_entry')
+          .eq('to_type', 'document')
 
-        const events = (evRes.data ?? []) as unknown as EventRow[]
+        const [calRes, docRes, linksRes] = await Promise.all([calQ, docQ, linksQ])
+
+        const cal2doc = new Map<string, string>()
+        for (const l of (linksRes.data ?? []) as { from_id: string; to_id: string }[]) {
+          cal2doc.set(l.from_id, l.to_id)
+        }
+
+        // Адаптируем calendar_entries к старому формату EventRow:
+        // entry_type → event_type, date_ref_entry_id → date_ref_event_id, entity_id ← cal2doc.
+        type CalRow = {
+          id: string; entry_type: string; title: string | null; stage_name: string | null;
+          date_end: string | null; date_start: string | null;
+          date_mode: string; date_ref_entry_id: string | null;
+          date_ref_offset: number; date_ref_offset_type: string;
+          exec_days: number | null; exec_type: string | null;
+        }
+        const calRows = (calRes.data ?? []) as unknown as CalRow[]
+        const events: EventRow[] = calRows
+          .map((c) => ({
+            id: c.id,
+            event_type: c.entry_type,
+            title: c.title,
+            stage_name: c.stage_name,
+            entity_id: cal2doc.get(c.id) ?? '',
+            date_end: c.date_end,
+            date_start: c.date_start,
+            date_mode: c.date_mode as 'absolute' | 'relative',
+            date_ref_event_id: c.date_ref_entry_id,
+            date_ref_offset: c.date_ref_offset,
+            date_ref_offset_type: c.date_ref_offset_type as 'calendar' | 'working',
+            exec_days: c.exec_days,
+            exec_type: c.exec_type as 'calendar' | 'working' | null,
+          }))
+          .filter((e) => documentId ? e.entity_id === documentId : e.entity_id !== '')
         const docs = (docRes.data ?? []) as (Record<string, unknown> & { id: string; title: string })[]
 
         const docShort = new Map<string, string>()

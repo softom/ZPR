@@ -72,13 +72,31 @@ if ($DryRun) {
 }
 
 # 5 - Apply one by one with ON_ERROR_STOP (psql returns non-zero on first error)
+#
+# IMPORTANT (encoding): we `docker cp` each file into the container and run it
+# with `psql -f`, instead of piping `$sql | docker exec ... psql`. On Windows
+# PowerShell the stdin pipe re-encodes the stream through $OutputEncoding
+# (ASCII by default), which SILENTLY turns every Cyrillic character into '?'.
+# That corruption already destroyed string literals inside applied functions:
+#   - news placeholder 'Новое событие'  -> '????? ???????'
+#   - task-code prefixes '-ЗАД' / '-ОБС' -> '-???'  (broke regex: quantifier error)
+#   - normalize_org_name char class '[«»"'']' -> '[??"'']'
+# `docker cp` transfers raw UTF-8 bytes untouched, so literals survive.
 foreach ($f in $newFiles) {
     Write-Host "-> $($f.Name)" -ForegroundColor Cyan
-    $sql = Get-Content -Raw -Encoding utf8 -Path $f.FullName
 
-    $sql | docker exec -i $Container psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q
+    $remotePath = "/tmp/zpr_migrate_$($f.BaseName).sql"
+    docker cp $f.FullName "${Container}:$remotePath"
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[FAIL] Migration '$($f.Name)' errored (exit $LASTEXITCODE). Stopping." -ForegroundColor Red
+        Write-Host "[FAIL] docker cp failed for '$($f.Name)'." -ForegroundColor Red
+        exit 1
+    }
+
+    docker exec $Container psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q -f $remotePath
+    $applyExit = $LASTEXITCODE
+    docker exec $Container rm -f $remotePath | Out-Null
+    if ($applyExit -ne 0) {
+        Write-Host "[FAIL] Migration '$($f.Name)' errored (exit $applyExit). Stopping." -ForegroundColor Red
         Write-Host "       Subsequent migrations NOT applied. Fix the issue and re-run." -ForegroundColor Red
         exit 1
     }

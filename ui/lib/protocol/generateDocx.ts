@@ -103,6 +103,9 @@ export async function generateProtocolDocx(meetingId: string): Promise<Buffer> {
       .from('tasks')
       .select('id,code,title,explanation,status,assignee_org,due_date,object_ids,done_note')
       .eq('meeting_id', meetingId)
+      // cancelled — удалена по замечанию (kind='remove_task'), в WORD не выводим.
+      // preliminary — черновики до approve (защита; обычно отсутствуют на approved).
+      .not('status', 'in', '(cancelled,preliminary)')
       .order('code'),
     supabaseAdmin.from('objects').select('id,code,current_name'),
     // Per-object закрытия в дату собрания на объектах собрания

@@ -9,7 +9,21 @@ type User = {
   role: string
   created_at: string
   last_sign_in_at: string | null
-  banned_until: string | null
+}
+
+type GisSyncTableResult = {
+  table: string
+  rows: number
+  durationMs: number
+  error?: string
+}
+
+type GisSyncResponse = {
+  ok: boolean
+  totalRows?: number
+  tables?: GisSyncTableResult[]
+  error?: string
+  results?: GisSyncTableResult[]
 }
 
 const ROLES = [
@@ -24,31 +38,22 @@ const ROLE_BADGE: Record<string, string> = {
   admin:    'bg-purple-100 text-purple-700',
 }
 
-function isBanned(u: User): boolean {
-  if (!u.banned_until) return false
-  return new Date(u.banned_until).getTime() > Date.now()
-}
-
 export default function AdminPage() {
   const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<string | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
   const [error, setError] = useState('')
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const [currentRole, setCurrentRole] = useState<string | null>(null)
 
-  const [showAdd, setShowAdd] = useState(false)
-  const [newEmail, setNewEmail] = useState('')
-  const [newPassword, setNewPassword] = useState('')
-  const [newRole, setNewRole] = useState('viewer')
-
-  const [pwUserId, setPwUserId] = useState<string | null>(null)
-  const [pwValue, setPwValue] = useState('')
+  // GIS Sync state
+  const [gisLoading, setGisLoading] = useState(false)
+  const [gisResult, setGisResult] = useState<GisSyncResponse | null>(null)
+  const [gisError, setGisError] = useState('')
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setCurrentUserId(session?.user?.id ?? null)
-      setCurrentRole((session?.user?.user_metadata?.role as string) ?? 'viewer')
+      const role = (session?.user?.user_metadata?.role as string) ?? 'viewer'
+      setCurrentRole(role)
     })
     load()
   }, [])
@@ -56,18 +61,6 @@ export default function AdminPage() {
   async function getToken(): Promise<string | null> {
     const { data: { session } } = await supabase.auth.getSession()
     return session?.access_token ?? null
-  }
-
-  async function authedFetch(method: string, body: object) {
-    const token = await getToken()
-    return fetch('/api/users', {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(body),
-    })
   }
 
   async function load() {
@@ -79,112 +72,57 @@ export default function AdminPage() {
   }
 
   async function changeRole(id: string, role: string) {
-    setBusy(id); setError('')
-    const res = await authedFetch('PATCH', { id, role })
+    setSaving(id)
+    setError('')
+    const token = await getToken()
+    const res = await fetch('/api/users', {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ id, role }),
+    })
     if (!res.ok) {
-      setError((await res.json()).error ?? 'Ошибка')
+      const d = await res.json()
+      setError(d.error ?? 'Ошибка')
     } else {
       setUsers(u => u.map(user => user.id === id ? { ...user, role } : user))
     }
-    setBusy(null)
+    setSaving(null)
   }
 
-  async function toggleBan(u: User) {
-    setBusy(u.id); setError('')
-    const banned = !isBanned(u)
-    const res = await authedFetch('PATCH', { id: u.id, banned })
-    if (!res.ok) {
-      setError((await res.json()).error ?? 'Ошибка')
-    } else {
-      await load()
+  async function handleGisSync() {
+    setGisLoading(true)
+    setGisError('')
+    setGisResult(null)
+    try {
+      const res = await fetch('/api/gis/sync', { method: 'POST' })
+      const data: GisSyncResponse = await res.json()
+      if (!res.ok || !data.ok) {
+        setGisError(data.error ?? `HTTP ${res.status}`)
+      }
+      setGisResult(data)
+    } catch (err) {
+      setGisError(err instanceof Error ? err.message : 'Сетевая ошибка')
     }
-    setBusy(null)
-  }
-
-  async function createUser(e: React.FormEvent) {
-    e.preventDefault()
-    setBusy('new'); setError('')
-    const res = await authedFetch('POST', { email: newEmail, password: newPassword, role: newRole })
-    if (!res.ok) {
-      setError((await res.json()).error ?? 'Ошибка')
-    } else {
-      setNewEmail(''); setNewPassword(''); setNewRole('viewer'); setShowAdd(false)
-      await load()
-    }
-    setBusy(null)
-  }
-
-  async function savePassword(id: string) {
-    setBusy(id); setError('')
-    const res = await authedFetch('PATCH', { id, password: pwValue })
-    if (!res.ok) {
-      setError((await res.json()).error ?? 'Ошибка')
-    } else {
-      setPwUserId(null); setPwValue('')
-    }
-    setBusy(null)
+    setGisLoading(false)
   }
 
   const isAdmin = currentRole === 'admin'
 
   return (
-    <div className="max-w-4xl">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900">Пользователи</h1>
-        {isAdmin && (
-          <button
-            onClick={() => setShowAdd(s => !s)}
-            className="px-3 py-2 rounded-md text-sm font-medium bg-blue-600 text-white hover:bg-blue-700"
-          >
-            {showAdd ? 'Отмена' : 'Добавить пользователя'}
-          </button>
-        )}
-      </div>
+    <div className="max-w-2xl">
+      <h1 className="text-2xl font-semibold text-gray-900 mb-6">Пользователи</h1>
 
       {!isAdmin && currentRole !== null && (
         <div className="mb-4 text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2">
-          Просмотр доступен всем. Изменения — только администратору.
+          Просмотр доступен всем. Изменение ролей — только администратору.
         </div>
       )}
 
       {error && (
         <p className="mb-4 text-sm text-red-500 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</p>
-      )}
-
-      {isAdmin && showAdd && (
-        <form onSubmit={createUser} className="mb-6 bg-white border border-gray-200 rounded-lg p-4 grid grid-cols-1 sm:grid-cols-4 gap-3">
-          <input
-            type="email"
-            required
-            placeholder="email@example.com"
-            value={newEmail}
-            onChange={e => setNewEmail(e.target.value)}
-            className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-          />
-          <input
-            type="text"
-            required
-            minLength={6}
-            placeholder="Пароль (≥6)"
-            value={newPassword}
-            onChange={e => setNewPassword(e.target.value)}
-            className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-          />
-          <select
-            value={newRole}
-            onChange={e => setNewRole(e.target.value)}
-            className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-          >
-            {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
-          </select>
-          <button
-            type="submit"
-            disabled={busy === 'new'}
-            className="px-3 py-2 rounded-md text-sm font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
-          >
-            {busy === 'new' ? 'Создание…' : 'Создать'}
-          </button>
-        </form>
       )}
 
       {loading ? (
@@ -196,96 +134,124 @@ export default function AdminPage() {
               <tr className="bg-gray-50 border-b border-gray-200">
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Email</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Роль</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Статус</th>
                 {isAdmin && (
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Действия</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Изменить</th>
                 )}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {users.map(user => {
-                const banned = isBanned(user)
-                const isSelf = user.id === currentUserId
-                const disabled = busy === user.id
-                return (
-                  <tr key={user.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 text-gray-900">{user.email}{isSelf && <span className="ml-2 text-xs text-gray-400">(вы)</span>}</td>
+              {users.map(user => (
+                <tr key={user.id} className="hover:bg-gray-50">
+                  <td className="px-4 py-3 text-gray-900">{user.email}</td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${ROLE_BADGE[user.role] ?? ROLE_BADGE.viewer}`}>
+                      {user.role}
+                    </span>
+                  </td>
+                  {isAdmin && (
                     <td className="px-4 py-3">
-                      {isAdmin && !isSelf ? (
-                        <select
-                          value={user.role}
-                          disabled={disabled}
-                          onChange={e => changeRole(user.id, e.target.value)}
-                          className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-50"
-                        >
-                          {ROLES.map(r => <option key={r.value} value={r.value}>{r.value}</option>)}
-                        </select>
-                      ) : (
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${ROLE_BADGE[user.role] ?? ROLE_BADGE.viewer}`}>
-                          {user.role}
-                        </span>
-                      )}
+                      <select
+                        value={user.role}
+                        disabled={saving === user.id}
+                        onChange={e => changeRole(user.id, e.target.value)}
+                        className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-50"
+                      >
+                        {ROLES.map(r => (
+                          <option key={r.value} value={r.value}>{r.label}</option>
+                        ))}
+                      </select>
                     </td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${banned ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
-                        {banned ? 'Заблокирован' : 'Активен'}
-                      </span>
-                    </td>
-                    {isAdmin && (
-                      <td className="px-4 py-3">
-                        {isSelf ? (
-                          <span className="text-xs text-gray-400">—</span>
-                        ) : pwUserId === user.id ? (
-                          <div className="flex gap-2 items-center">
-                            <input
-                              type="text"
-                              minLength={6}
-                              placeholder="Новый пароль"
-                              value={pwValue}
-                              onChange={e => setPwValue(e.target.value)}
-                              className="border border-gray-300 rounded-md px-2 py-1 text-sm w-40"
-                            />
-                            <button
-                              onClick={() => savePassword(user.id)}
-                              disabled={disabled || pwValue.length < 6}
-                              className="px-2 py-1 rounded-md text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                            >
-                              Сохранить
-                            </button>
-                            <button
-                              onClick={() => { setPwUserId(null); setPwValue('') }}
-                              className="px-2 py-1 rounded-md text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200"
-                            >
-                              Отмена
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => toggleBan(user)}
-                              disabled={disabled}
-                              className={`px-2 py-1 rounded-md text-xs font-medium disabled:opacity-50 ${banned ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}
-                            >
-                              {banned ? 'Разблокировать' : 'Заблокировать'}
-                            </button>
-                            <button
-                              onClick={() => { setPwUserId(user.id); setPwValue('') }}
-                              disabled={disabled}
-                              className="px-2 py-1 rounded-md text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50"
-                            >
-                              Сменить пароль
-                            </button>
-                          </div>
-                        )}
-                      </td>
-                    )}
-                  </tr>
-                )
-              })}
+                  )}
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
       )}
+
+      {/* ── GIS Sync ─────────────────────────────────────────────────── */}
+      <div className="mt-10">
+        <h2 className="text-xl font-semibold text-gray-900 mb-2">Синхронизация GIS</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Копирование данных из вьюшек <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">gis_*</code> (postgres)
+          в таблицы <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">*_sk63</code> (zpr_gis) для ArcGIS Pro.
+        </p>
+
+        <button
+          onClick={handleGisSync}
+          disabled={gisLoading}
+          className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {gisLoading ? 'Синхронизация…' : 'Синхронизировать GIS → ArcGIS'}
+        </button>
+
+        {gisError && (
+          <p className="mt-3 text-sm text-red-500 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+            {gisError}
+          </p>
+        )}
+
+        {gisResult && gisResult.ok && (
+          <div className="mt-4 bg-white border border-gray-200 rounded-lg overflow-hidden">
+            <div className="px-4 py-3 bg-green-50 border-b border-green-200 flex items-center justify-between">
+              <span className="text-sm font-medium text-green-800">
+                Синхронизация завершена
+              </span>
+              <span className="text-sm text-green-600 tabular-nums">
+                {gisResult.totalRows?.toLocaleString('ru')} строк
+              </span>
+            </div>
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Таблица</th>
+                  <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Строк</th>
+                  <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Время</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {gisResult.tables?.map((t) => (
+                  <tr key={t.table} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-xs text-gray-700">{t.table}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-gray-900">{t.rows.toLocaleString('ru')}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-gray-500">{t.durationMs} мс</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {gisResult && !gisResult.ok && gisResult.results && gisResult.results.length > 0 && (
+          <div className="mt-4 bg-white border border-red-200 rounded-lg overflow-hidden">
+            <div className="px-4 py-3 bg-red-50 border-b border-red-200">
+              <span className="text-sm font-medium text-red-800">Синхронизация прервана</span>
+            </div>
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Таблица</th>
+                  <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Строк</th>
+                  <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Статус</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {gisResult.results.map((t) => (
+                  <tr key={t.table} className={t.error ? 'bg-red-50' : 'hover:bg-gray-50'}>
+                    <td className="px-4 py-2 font-mono text-xs text-gray-700">{t.table}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-gray-900">{t.rows.toLocaleString('ru')}</td>
+                    <td className="px-4 py-2 text-xs">
+                      {t.error
+                        ? <span className="text-red-600">{t.error}</span>
+                        : <span className="text-green-600">OK</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

@@ -1,13 +1,18 @@
 /**
  * POST /api/contracts/v2/analyze
- * Принимает текст PDF (с маркерами [PAGE N]) и список объектов проекта.
- * Возвращает ContractAnalysis (стороны, метаданные, пункты договора).
  *
- * Соответствует ТЗ модуля A — см. 18_Архитектура_модулей.md.
+ * Принимает текст PDF (с маркерами [PAGE N]) и список объектов проекта.
+ * Возвращает ContractAnalysis с метаданными и сторонами, **но без clauses и stages**:
+ *   - clauses всегда []
+ *   - этапы договора (contract_stages) выделяются отдельно — кнопка «🎯 Выделить этапы»
+ *   - пункты (события) договора — кнопка «🎯 Выделить события договора» (после этапов)
+ *
+ * Это убирает «холостой прогон» LLM по пунктам до этапов (раньше пункты извлекались
+ * сразу, потом перевыделялись с правильным stage_number — двойная работа).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { extractContractClauses, type ObjectInfo, type ProjectStage } from '@/lib/parser/extractClauses'
+import { extractContractMetadata, type ObjectInfo, type ProjectStage } from '@/lib/parser/extractClauses'
 
 export async function POST(request: NextRequest) {
   try {
@@ -24,7 +29,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const analysis = await extractContractClauses(text, objects ?? [], project_stages ?? [])
+    const analysis = await extractContractMetadata(text, objects ?? [], project_stages ?? [])
     return NextResponse.json(analysis)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)

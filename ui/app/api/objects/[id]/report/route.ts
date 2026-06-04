@@ -18,7 +18,7 @@ type Task = {
   due_date: string | null
   done_date: string | null             // per-object done_date
   created_at: string
-  source_meeting_date: string | null
+  meeting_date: string | null          // JOIN'ом из meetings по meeting_id (см. WIKI 19 v2.4)
 }
 
 // ─── Дата: понедельник—воскресенье недели ───────────────────────────────────
@@ -124,19 +124,25 @@ export async function POST(
     const taskIds = tos.map((r) => r.task_id)
     const { data: tasksRaw, error: taskErr } = await supabaseAdmin
       .from('tasks')
-      .select('id, code, title, explanation, priority, due_date, created_at, source_meeting_date')
+      .select('id, code, title, explanation, priority, due_date, created_at, meetings:meeting_id(meeting_date)')
       .in('id', taskIds)
       .order('created_at', { ascending: true })
 
     if (taskErr) return NextResponse.json({ error: taskErr.message }, { status: 500 })
 
+    type Raw = Omit<Task, 'status' | 'done_date' | 'meeting_date'> & {
+      meetings: { meeting_date: string | null } | { meeting_date: string | null }[] | null
+    }
     const tosByTaskId = new Map(tos.map((r) => [r.task_id, r]))
-    tasks = ((tasksRaw as Omit<Task, 'status' | 'done_date'>[]) || []).map((t) => {
+    tasks = ((tasksRaw as Raw[]) || []).map((t) => {
       const r = tosByTaskId.get(t.id)
+      const m = Array.isArray(t.meetings) ? t.meetings[0] : t.meetings
+      const { meetings: _meetings, ...rest } = t
       return {
-        ...t,
+        ...rest,
         status: r?.status ?? 'open',
         done_date: r?.done_date ?? null,
+        meeting_date: m?.meeting_date ?? null,
       }
     })
   }

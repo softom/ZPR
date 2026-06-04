@@ -1,4 +1,5 @@
 import type { SectionStatsWithObject } from './sectionStats'
+import { PROJECT_GLOSSARY } from '@/lib/llm/projectGlossary'
 
 const POLZA_BASE_URL = process.env.POLZA_BASE_URL ?? 'https://polza.ai/api/v1'
 const POLZA_API_KEY  = process.env.POLZA_API_KEY ?? ''
@@ -91,6 +92,8 @@ export async function generateSummary(
 
   const prompt = `Ты — помощник руководителя строительного проекта «Золотые Пески России».
 Сформируй общую сводку по проекту за ${periodLabel} на основе разделов по объектам.
+
+${PROJECT_GLOSSARY}
 ${financeBlock}
 
 ═══ АГРЕГАТНЫЕ ПОКАЗАТЕЛИ ПО ВСЕМ ОБЪЕКТАМ ═══

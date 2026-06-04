@@ -30,7 +30,41 @@ body {
    чтобы контент целиком вышел в поток печати.
    Скрываем сайдбар и интерактивные кнопки.
 */
+/* Класс для контента, который виден только при печати.
+   Скрыт на экране (через !important перебивает inline display:flex и пр.). */
+.print-only {
+  display: none !important;
+}
+
+/* Обратный класс: скрыт только на экране, виден при печати.
+   Используется в /reports/[id] для tab-навигации: активный таб — один объект,
+   при печати — ВСЕ объекты на отдельных страницах.
+   Спецификация: явное !important + override при печати. */
+.screen-hidden {
+  display: none !important;
+}
 @media print {
+  .screen-hidden {
+    display: revert !important;
+  }
+}
+
+/* Номер объекта в заголовке: на +15% больше родителя, чуть жирнее.
+   На экране родитель h2.text-xl (~20px) → ~23px. При печати h2 = 16pt → ~18.4pt. */
+.obj-number {
+  font-size: 1.15em;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+@media print {
+  /* .print-only — единый класс. Восстанавливает дефолтный display элемента
+     (block для div/section, inline для span и т.д.). Использует revert, чтобы
+     не зашивать конкретный тип. */
+  .print-only {
+    display: revert !important;
+  }
+
   html, body {
     height: auto !important;
     overflow: visible !important;
@@ -91,19 +125,32 @@ body {
     display: block !important;
     width: 100% !important;
     box-sizing: border-box;
-    border: 1px solid #d1d5db !important;
+    border: 0 !important;
     box-shadow: none !important;
     margin: 0 !important;
-    padding: 6mm !important;
+    padding: 0 !important;
     page-break-after: always;
     break-after: page;
-    page-break-inside: avoid;
-    break-inside: avoid;
+    /* page-break-inside: avoid снято — иначе разрывы перед DonePeriodBlock
+       (ObjectSchema и заголовок "По объекту...") не работают. Каждый объект
+       по-прежнему на новой странице через page-break-after. */
+    page-break-inside: auto;
+    break-inside: auto;
   }
 
   .object-report:last-of-type {
     page-break-after: auto;
     break-after: auto;
+  }
+
+  /* Разрыв ПЕРЕД первым объектом: над секциями идёт article с общей
+     сводкой отчёта (обложка). У неё нет page-break-after, поэтому обложка
+     и титульный лист первого объекта (МАСТЕРПЛАН) делили один лист, а
+     высокая SVG-схема не влезала и уезжала на следующую страницу.
+     Теперь: обложка-сводка — отдельный лист, объекты начинаются с нового. */
+  .object-report:first-of-type {
+    page-break-before: always;
+    break-before: page;
   }
 
   /* Шапка объекта */
@@ -114,6 +161,17 @@ body {
 
   .object-report h3 {
     font-size: 11pt;
+  }
+
+  /* Заголовки не должны «осиротеть» внизу страницы в отрыве от контента.
+     break-after: avoid переносит заголовок на след. страницу вместе с
+     первой строкой содержимого (устраняет лишний разрыв вида
+     «3.2 ОСНОВНЫЕ ПУНКТЫ» внизу листа, а пункты — на следующем). */
+  .object-report h2,
+  .object-report h3,
+  .object-report h4 {
+    break-after: avoid;
+    page-break-after: avoid;
   }
 
   /* Содержимое */
@@ -137,4 +195,86 @@ body {
   .stats-cards-grid { display: block !important; }
   .stats-card { display: block !important; page-break-inside: avoid; break-inside: avoid; }
   .stats-overview, .no-print { display: none !important; }
+
+  /* Сводка блок 0: убрать яркий фон/рамку, оставить структурный текст */
+  .report-summary-block {
+    background: white !important;
+    border: 0 !important;
+    padding: 0 !important;
+  }
+  .report-summary-block .summary-chip {
+    background: white !important;
+    border: 0 !important;
+    padding: 0 !important;
+    color: inherit !important;
+  }
+  /* Карточки внутри сводки (договор+этапы) — без фона/рамки при печати */
+  .report-summary-block .contract-card {
+    background: white !important;
+    border: 0 !important;
+    padding: 0 !important;
+    margin-bottom: 2mm !important;
+  }
+
+  /* Заголовки групп объектов («⭐ Первоочередные», «Прочие») — служебные,
+     при печати не нужны: каждая карточка объекта и так на отдельной странице. */
+  .report-group-heading {
+    display: none !important;
+  }
+
+  /* Принудительный разрыв страницы перед блоком. Используется для блока
+     «✓ Выполнено за отчётный период» — выносится на отдельную страницу
+     после полей 1-4 секции объекта. */
+  .print-page-break-before {
+    page-break-before: always !important;
+    break-before: page !important;
+  }
+  /* Разрыв ПОСЛЕ блока — для титульного листа объекта (схема + название).
+     После него следующая страница начинается с содержания (поля 1-4). */
+  .print-page-break-after {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  /* ─── Все рамки/плашки в печатном отчёте — НЕВИДИМЫ ──────────────────
+     Договорённость: печатная форма без бордюров, теней и цветных
+     подложек — только заголовки, текст и отступы. border-color:transparent
+     (а не border:0) сохраняет отступы, чтобы текст не «прыгал».
+     Таблицы исключены (в контенте может быть нужна сетка), SVG-схема не
+     затрагивается — её контур это stroke у <path>, а не CSS-border. */
+  .object-report *:not(table):not(thead):not(tbody):not(tr):not(th):not(td),
+  .report-summary-block,
+  .report-summary-block *,
+  .report-preamble-block,
+  .report-preamble-block * {
+    border-color: transparent !important;
+    box-shadow: none !important;
+  }
+  /* Цветные подложки карточек (bg-gray-50 / bg-emerald-50 / bg-white и т.п.)
+     — на печати прозрачные. */
+  .object-report [class*="bg-"] {
+    background: transparent !important;
+  }
+
+  /* PNG-обложка объекта на титульном листе. Вписываем в лист так, чтобы
+     вместе с авто-заголовком (Название + площадь) уместилась на одной
+     странице A4. object-fit: contain — сохраняем пропорции картинки. */
+  .report-cover-figure {
+    margin: 2mm 0 0 0 !important;
+    text-align: center;
+  }
+  .report-cover-img {
+    width: 100% !important;
+    max-height: 235mm !important;
+    object-fit: contain;
+  }
+
+  /* Блок преамбулы при печати — без рамки/фона/тени, только текст */
+  .report-preamble-block {
+    background: white !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 0 4mm 0 !important;
+  }
 }

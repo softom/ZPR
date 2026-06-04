@@ -12,7 +12,7 @@ type TaskItem = {
   priority?: string | null
   due_date?: string | null
   created_at?: string | null
-  source_meeting_date?: string | null
+  meeting_date?: string | null  // подтягивается клиентом JOIN'ом meetings.meeting_date по meeting_id
 }
 
 export async function POST(request: NextRequest) {
@@ -61,7 +61,7 @@ function buildPrompt(groupBy: 'object' | 'entity', groupLabel: string, tasks: Ta
     parts.push(`«${t.title}»`)
     if (t.explanation) parts.push(`— ${t.explanation}`)
     if (t.due_date) parts.push(`(срок ${t.due_date})`)
-    if (t.source_meeting_date) parts.push(`(собрание ${t.source_meeting_date})`)
+    if (t.meeting_date) parts.push(`(собрание ${t.meeting_date})`)
     return parts.join(' ')
   }).join('\n')
 

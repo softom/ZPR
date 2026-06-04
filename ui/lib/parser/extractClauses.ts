@@ -8,11 +8,18 @@
  * Не работает с событиями (events). События появляются в модуле C (Этап 3).
  */
 
+import { PROJECT_GLOSSARY } from '@/lib/llm/projectGlossary'
+
 const POLZA_BASE_URL = process.env.POLZA_BASE_URL ?? 'https://polza.ai/api/v1'
 const POLZA_API_KEY  = process.env.POLZA_API_KEY ?? ''
 const LLM_MODEL      = process.env.LLM_MODEL ?? 'anthropic/claude-sonnet-4.6'
 
-const TEXT_LIMIT = 90_000
+// Поднято с 90_000 до 180_000 (2026-05-19): Claude Sonnet 4.6 имеет 200K токенов
+// контекста, ~180K символов кириллицы ≈ ~70K токенов — впритык, но безопасно.
+// Прежний лимит 90K обрезал длинные договоры на середине: например, у договора
+// 26-01-1 (146 852 chars) «Приложение №3 Календарный план» начинается на pos 91 071
+// и оставался невидим для LLM → даты этапов терялись.
+const TEXT_LIMIT = 180_000
 
 export interface ObjectInfo {
   code: string
@@ -25,6 +32,19 @@ export interface ProjectStage {
   code: string       // 'foresketch' | 'concept' | 'project' | 'working_docs' | 'expertise' | ...
   label: string      // 'Фор-Эскиз', 'Концепция', ...
   sort_order: number
+}
+
+/**
+ * Информация о типе события договора из классификатора `contract_event_types`.
+ * Передаётся в LLM-промпт `extractContractClauses` чтобы LLM мог проставить
+ * `event_type_code` каждому пункту. ID сервер резолвит сам.
+ */
+export interface ContractEventTypeInfo {
+  code: string                                            // 'fin_advance', 'work_stage' и т.п.
+  category: 'fin'|'work'|'term'|'legal'|'appr'|'comm'|'ctrl'
+  label: string                                           // «Аванс»
+  is_intermediate: boolean
+  is_anchor: boolean
 }
 
 export interface PartyInfo {
@@ -66,14 +86,43 @@ export interface ClauseInfo {
   term_text: string | null     // оригинальная формулировка из договора
   /**
    * Опционально — UUID конкретного пункта-источника (когда term_base='clause').
-   * LLM это поле НЕ заполняет; выставляется оператором в UI.
+   * LLM это поле НЕ заполняет (не знает UUID); сервер резолвит из term_ref_event_type_code
+   * + term_ref_stage_number, либо оператор задаёт вручную в UI.
    */
   term_ref_clause_id?: string | null
+
+  /**
+   * Структурная ссылка LLM на пункт-источник относительного срока (с 2026-05-18).
+   *
+   * Если term_text содержит ссылку на другое событие договора («5 раб. дней с даты
+   * начала выполнения работ по Этапу 1»), LLM ставит:
+   *   - term_ref_event_type_code = 'work_start' (тип источника)
+   *   - term_ref_stage_number    = 1            (этап источника, если применимо)
+   *
+   * Сервер в /clauses/replace ищет в БД пункт с event_type_id=resolveCode и
+   * stage_id=resolveStage; если ровно 1 кандидат → выставляет term_ref_clause_id.
+   * Если 0/несколько — оставляет null, оператор довязывает в UI.
+   *
+   * Особый случай: ссылка на дату подписания договора → term_ref_event_type_code='legal_contract_sign'
+   * (либо просто оставить null — сработает старая эвристика `refersToContractSigning`).
+   */
+  term_ref_event_type_code?: string | null
+  term_ref_stage_number?: number | null
 
   description: string
   note: string | null
   source_page: number | null
   source_quote: string
+
+  /**
+   * Привязка пункта к этапу договора. Заполняется LLM по контексту
+   * `contractStages` (из `extractContractStages`).
+   * - число (1, 2, 3) — пункт относится к этапу с таким `stage_number`.
+   * - null — пункт общий по договору (например, авансы без привязки к этапу,
+   *   юридические пункты, обязательства сторон).
+   * На сервере резолвится в `stage_id` через map `stage_number → contract_stages.id`.
+   */
+  stage_number?: number | null
 
   /**
    * Режим пункта — какое поле определяющее. См. WIKI 17 «Режим пункта».
@@ -85,13 +134,19 @@ export interface ClauseInfo {
   date_mode?: 'date' | 'term' | null
 
   /**
-   * Классификатор пункта. Возвращается LLM при анализе.
-   * - 'fin'   — финансовый (платежи, авансы, окончательные расчёты, штрафы)
-   * - 'work'  — производственный (этапы работ, начало/окончание выполнения)
-   * - 'appr'  — согласование (сдача документации, экспертиза, подписание актов)
-   * - 'legal' — юридический (подписание договора/ДС, расторжение)
+   * Денормализованная категория (синкается на сервере из event_type_code).
+   * 7 значений: fin/work/term/legal/appr/comm/ctrl.
+   * LLM может вернуть для backward-compat, но основной источник — event_type_code.
    */
-  category?: 'fin' | 'work' | 'appr' | 'legal' | null
+  category?: 'fin' | 'work' | 'term' | 'legal' | 'appr' | 'comm' | 'ctrl' | null
+
+  /**
+   * Код типа события договора (классификатор contract_event_types, см. WIKI 17 v1.3).
+   * Возвращается LLM из списка из 31 кода (см. промпт). На сервере резолвится
+   * в event_type_id (uuid). Если LLM не уверен — null; оператор поставит вручную в UI.
+   * НЕ присваивать 'legal_contract_sign' — это код anchor-пункта, его сервер ставит сам.
+   */
+  event_type_code?: string | null
 
   // UI-only: стабильный id для dnd-kit drag&drop. Не передаётся в БД.
   _id?: string
@@ -118,14 +173,58 @@ export interface ContractAnalysis {
   clauses: ClauseInfo[]
 }
 
+/**
+ * Один проход LLM — извлекает метаданные + clauses.
+ * Если `contractStages` передан (с предварительного прохода `extractContractStages`),
+ * LLM также проставит каждому clause поле `stage_number` (привязка к этапу).
+ * Если `eventTypes` передан — LLM проставит `event_type_code` (классификатор contract_event_types).
+ */
 export async function extractContractClauses(
   text: string,
   objects: ObjectInfo[],
   projectStages: ProjectStage[] = [],
+  contractStages: { stage_number: number; stage_name: string }[] = [],
+  eventTypes: ContractEventTypeInfo[] = [],
 ): Promise<ContractAnalysis> {
-  const prompt = buildPrompt(text, objects, projectStages)
+  const prompt = buildPrompt(text, objects, projectStages, contractStages, eventTypes)
   const raw = await callLLM(prompt)
   return raw as ContractAnalysis
+}
+
+/**
+ * Облегчённый проход LLM — извлекает ТОЛЬКО метаданные (стороны, объекты, стадия,
+ * заголовок, дата). НЕ трогает clauses и НЕ требует этапов договора.
+ *
+ * Используется при первичной загрузке договора (`/api/contracts/v2/analyze`).
+ * Этапы и пункты выделяются позже через отдельные кнопки в карточке договора:
+ *   - «🎯 Выделить этапы»            → POST /extract-stages
+ *   - «🎯 Выделить события договора» → POST /reparse { skip_stages: true } + /clauses/replace
+ *
+ * Экономит ~50% LLM-токенов на первичной загрузке (раньше «холостой прогон»
+ * пробегал по пунктам до выделения этапов).
+ */
+export async function extractContractMetadata(
+  text: string,
+  objects: ObjectInfo[],
+  projectStages: ProjectStage[] = [],
+): Promise<ContractAnalysis> {
+  const prompt = buildMetadataPrompt(text, objects, projectStages)
+  const raw = await callLLM(prompt) as Partial<ContractAnalysis>
+  return {
+    title:          raw.title          ?? '',
+    number:         raw.number         ?? '',
+    signed_date:    raw.signed_date    ?? null,
+    contract_type:  raw.contract_type  ?? '',
+    version:        raw.version        ?? '',
+    subject:        raw.subject        ?? '',
+    amount:         raw.amount         ?? '',
+    project_stage:  raw.project_stage  ?? null,
+    customer:       raw.customer       ?? { name:'', inn:'', kpp:'', address:'', signatory_name:'', signatory_position:'', role:'' },
+    contractor:     raw.contractor     ?? { name:'', inn:'', kpp:'', address:'', signatory_name:'', signatory_position:'', role:'' },
+    object_codes:   raw.object_codes   ?? [],
+    object_aliases: raw.object_aliases ?? {},
+    clauses:        [],   // пустой — извлекаются отдельно
+  }
 }
 
 function buildObjectsHint(objects: ObjectInfo[]): string {
@@ -146,7 +245,58 @@ function buildStagesHint(stages: ProjectStage[]): string {
     .join('\n')
 }
 
-function buildPrompt(text: string, objects: ObjectInfo[], stages: ProjectStage[]): string {
+function buildEventTypesHint(types: ContractEventTypeInfo[]): string {
+  if (!types.length) return '(классификатор не передан — оставь event_type_code = null)'
+  const CAT_LABEL: Record<ContractEventTypeInfo['category'], string> = {
+    fin:   'Финансовые',
+    work:  'Производственные',
+    term:  'Сроковые',
+    legal: 'Юридические',
+    appr:  'Согласовательные',
+    ctrl:  'Контрольные / приёмочные',
+    comm:  'Коммуникационные',
+  }
+  // Группируем по категории, anchor-типы помечаем чтобы LLM их не использовал
+  const grouped = new Map<string, ContractEventTypeInfo[]>()
+  for (const t of types) {
+    const arr = grouped.get(t.category) ?? []
+    arr.push(t)
+    grouped.set(t.category, arr)
+  }
+  const order: ContractEventTypeInfo['category'][] = ['legal','work','fin','term','appr','ctrl','comm']
+  return order
+    .filter(cat => grouped.has(cat))
+    .map(cat => {
+      const lines = (grouped.get(cat) ?? []).map(t => {
+        const flags: string[] = []
+        if (t.is_anchor) flags.push('ANCHOR — не создавай руками')
+        if (t.is_intermediate) flags.push('промежуточный')
+        const flagStr = flags.length ? ` [${flags.join(', ')}]` : ''
+        return `  ${t.code.padEnd(24)} — ${t.label}${flagStr}`
+      }).join('\n')
+      return `\n${CAT_LABEL[cat]} (${cat}):\n${lines}`
+    })
+    .join('\n')
+}
+
+function buildContractStagesHint(stages: { stage_number: number; stage_name: string }[]): string {
+  if (!stages.length) {
+    return '(этапы договора не выделены — оставь stage_number = null у всех clauses)'
+  }
+  return stages
+    .map(s => `  ${s.stage_number} — ${s.stage_name}`)
+    .join('\n')
+}
+
+/**
+ * Промпт «только метаданные» — без секции пунктов договора.
+ * Используется при первичной загрузке: пункты выделяются позже отдельной кнопкой.
+ */
+function buildMetadataPrompt(
+  text: string,
+  objects: ObjectInfo[],
+  stages: ProjectStage[],
+): string {
   const truncated = text.length > TEXT_LIMIT
     ? text.slice(0, TEXT_LIMIT) + '\n[...текст обрезан...]'
     : text
@@ -154,6 +304,110 @@ function buildPrompt(text: string, objects: ObjectInfo[], stages: ProjectStage[]
   const stagesHint  = buildStagesHint(stages)
 
   return `Ты помощник по обработке строительных договоров. Проанализируй текст и верни ТОЛЬКО JSON-объект без пояснений.
+
+${PROJECT_GLOSSARY}
+
+В тексте сохранены маркеры страниц вида «[PAGE N]». Используй их, чтобы заполнить поле "source_page".
+
+⚠️ ВАЖНО: На этом этапе извлекаются ТОЛЬКО метаданные и стороны.
+Пункты договора (clauses) и этапы (stages) НЕ требуются — они выделяются отдельными запросами.
+
+═══ МЕТАДАННЫЕ ДОГОВОРА ═══
+
+"title"  — короткое название (до 80 символов). Включай номер договора. Пример: «Договор Альфа+ № 0000-00 ABC».
+"number" — номер договора как в тексте (например «2604-01», «ХГ-2026-003», «20250611/К»). Пустая строка если нет.
+"signed_date" — дата подписания в формате YYYY-MM-DD.
+  ГДЕ ИСКАТЬ: «г. Москва, "__" ___ 202_ г.», рядом с подписями, в реквизитах «Договор № ___ от ДД.ММ.ГГГГ».
+  Если не найдена — null.
+"contract_type" — «Договор» / «ДС» / «Акт».
+"version" — «v1» для первичного договора, «ДС1»/«ДС2»... для доп.соглашений.
+"subject" — предмет договора одним предложением.
+"amount" — итоговая сумма с валютой («1 250 000 ₽»). Пустая строка если нет.
+
+═══ СТАДИЯ ПРОЕКТА ═══
+
+"project_stage" — стадия проектирования, к которой относится договор. Один из кодов:
+${stagesHint}
+
+ПОДСКАЗКИ ПО КЛЮЧЕВЫМ СЛОВАМ:
+  - «фор-эскиз», «эскизный проект», «эскиз»                       → foresketch
+  - «концепция», «концептуальное решение», «АГК»,
+    «архитектурно-градостроительная концепция»                    → concept
+  - «проектная документация», «стадия П», просто «проект»
+    (без слова «рабочая»)                                          → project
+  - «рабочая документация», «РД», «стадия Р»                       → working_docs
+  - «экспертиза», «прохождение экспертизы»,
+    «государственная экспертиза», «негосударственная экспертиза»   → expertise
+
+Если стадия не определяется или договор не привязан к конкретной стадии — null.
+
+═══ СТОРОНЫ ДОГОВОРА ═══
+
+Найди ЗАКАЗЧИКА и ПОДРЯДЧИКА (или ИСПОЛНИТЕЛЯ, ПРОЕКТИРОВЩИКА). Реквизиты ищи везде:
+в шапке, в разделе «Реквизиты сторон», рядом с подписями в конце.
+
+"customer" — сторона с ролью «Заказчик» / «Технический заказчик» / «Застройщик»:
+  - "name": полное наименование как в договоре (например «ООО «Альфа»»)
+  - "inn": ИНН — 10 цифр (юр.лица) или 12 цифр (ИП)
+  - "kpp": КПП — 9 цифр. Пустая строка для ИП и физ.лиц.
+  - "address": юридический адрес. Пустая строка если не найден.
+  - "signatory_name": ФИО подписанта («Иванов Иван Иванович»). Пустая строка если не найден.
+  - "signatory_position": должность («Генеральный директор», «Директор»). Пустая строка если не найдено.
+  - "role": как написано в договоре («Заказчик», «Технический заказчик» и т.п.)
+
+"contractor" — сторона с ролью «Подрядчик» / «Исполнитель» / «Проектировщик»:
+  Те же поля. Реквизиты обычно в разделе «Реквизиты сторон» в конце.
+
+═══ ОБЪЕКТЫ ═══
+
+"object_codes" — коды объектов из таблицы. Сопоставляй по коду, названию, псевдониму.
+Таблица объектов проекта:
+${objectsHint}
+Верни только коды из этой таблицы. Пустой массив если не нашёл соответствий.
+
+"object_aliases" — словарь { object_code: [названия_из_текста, ...] }.
+Для КАЖДОГО объекта из object_codes — собери ВСЕ варианты, как объект назван в тексте.
+
+═══ ФОРМАТ ВОЗВРАТА ═══
+
+Верни ОДИН JSON-объект (БЕЗ поля "clauses"):
+{
+  "title": "...",
+  "number": "...",
+  "signed_date": "YYYY-MM-DD" | null,
+  "contract_type": "...",
+  "version": "...",
+  "subject": "...",
+  "amount": "...",
+  "project_stage": "foresketch" | "concept" | "project" | "working_docs" | "expertise" | null,
+  "customer": { name, inn, kpp, address, signatory_name, signatory_position, role },
+  "contractor": { name, inn, kpp, address, signatory_name, signatory_position, role },
+  "object_codes": ["..."],
+  "object_aliases": { "<code>": ["имя_из_текста1", ...], ... }
+}
+
+ТЕКСТ ДОКУМЕНТА:
+${truncated}`
+}
+
+function buildPrompt(
+  text: string,
+  objects: ObjectInfo[],
+  stages: ProjectStage[],
+  contractStages: { stage_number: number; stage_name: string }[] = [],
+  eventTypes: ContractEventTypeInfo[] = [],
+): string {
+  const truncated = text.length > TEXT_LIMIT
+    ? text.slice(0, TEXT_LIMIT) + '\n[...текст обрезан...]'
+    : text
+  const objectsHint = buildObjectsHint(objects)
+  const contractStagesHint = buildContractStagesHint(contractStages)
+  const stagesHint  = buildStagesHint(stages)
+  const eventTypesHint = buildEventTypesHint(eventTypes)
+
+  return `Ты помощник по обработке строительных договоров. Проанализируй текст и верни ТОЛЬКО JSON-объект без пояснений.
+
+${PROJECT_GLOSSARY}
 
 В тексте сохранены маркеры страниц вида «[PAGE N]». Используй их, чтобы заполнить поле "source_page".
 
@@ -222,11 +476,11 @@ ${objectsHint}
 
 НЕ включай:
   - текущее «current_name» объекта из таблицы выше (его и так знаем)
-  - сам код «006_ГОСТИНИЦА_350»
+  - сам код «106_ГОСТИНИЦА_350»
   - псевдонимы, которые УЖЕ есть в таблице (там после «псевдонимы:»)
   - общие слова без названия: «отель», «объект» — без конкретики
 
-Формат: { "006_ГОСТИНИЦА_350": ["Health Отель", "Объект №6"], "002_ГОСТИНИЦА_800": ["Family Солнышко"] }
+Формат: { "106_ГОСТИНИЦА_350": ["Health Отель", "Объект №6"], "102_ГОСТИНИЦА_800": ["Family Солнышко"] }
 Пустой объект {} если в тексте только current_name/код, без вариантов.
 
 ═══ ПУНКТЫ ДОГОВОРА (ГЛАВНОЕ) ═══
@@ -299,16 +553,35 @@ ${objectsHint}
         Пример: «15 (Пятнадцать) рабочих дней с даты подписания настоящего Договора».
     Если относительного срока в тексте нет — все три поля null.
 
-  🛑 "term_base" и "term_ref_clause_id" — ВСЕГДА null. Это поля привязки к конкретному
-     пункту-источнику; их **заполняет оператор** в UI после загрузки. LLM их не угадывает.
+  🛑 "term_base" и "term_ref_clause_id" — ВСЕГДА null. UUID сервер сам подставит.
 
-     Любая формулировка типа «с подписания договора», «после акта», «с аванса», «с начала
-     работ», «после Этапа N-1», «со сдачи документации», «с получения замечаний» — это
-     отсылка к ДРУГОМУ пункту того же договора (или к якорю «Дата заключения договора»).
-     Оператор выберет нужный пункт через UI dropdown.
+  ═══ ПРИВЯЗКА ОТНОСИТЕЛЬНОГО СРОКА К ПУНКТУ-ИСТОЧНИКУ ═══
 
-     Твоя задача — сохранить ОРИГИНАЛЬНУЮ формулировку в "term_text" + заполнить
-     "term_days"/"term_type" из числа дней. Привязка — позже.
+  Если term_text содержит относительную привязку к ДРУГОМУ событию договора —
+  заполни **структурно** через два поля (не через UUID):
+
+    - "term_ref_event_type_code" — код типа события-источника (из классификатора выше)
+    - "term_ref_stage_number"    — номер этапа источника (если ссылка специфична к этапу)
+
+  Сервер найдёт пункт с этим типом+этапом и проставит term_ref_clause_id автоматически.
+
+  Маппинг типичных формулировок:
+    «с даты подписания / заключения настоящего Договора»  → legal_contract_sign (этап null)
+    «с даты начала выполнения работ по Этапу N»            → work_start (stage=N)
+    «с даты окончания выполнения работ по Этапу N»         → work_result_delivery (stage=N)
+    «с даты подписания Акта сдачи-приёмки по Этапу N»      → ctrl_act_signing (stage=N)
+    «с даты получения замечаний Заказчика по Этапу N»      → appr_remarks (stage=N)
+    «с даты передачи исходных данных»                      → work_input_handover (этап null или указанный)
+    «с даты получения аванса по Этапу N»                   → fin_advance (stage=N)
+    «после Этапа N-1»                                       → work_result_delivery (stage=N-1)
+
+  Правила:
+    • Если ссылка явно к этапу («по Этапу 2», «по Этапу 1 (Массинг)») — заполни term_ref_stage_number.
+    • Если ссылка общего характера («с подписания договора», «с передачи исх. данных») — оставь
+      term_ref_stage_number = null.
+    • Если не уверен или ссылка неоднозначна («после сдачи документации» — какой документации?) —
+      оба поля null, оператор довяжет в UI.
+    • НЕ выдумывай связь, если в тексте её нет. Лучше null.
 
   - "description": краткое описание пункта (1-2 предложения). Пример: «Сдача форэскиза по объекту 001_TYPE_VAL».
 
@@ -318,18 +591,26 @@ ${objectsHint}
   - "source_page": номер страницы PDF, где найден пункт (по маркеру [PAGE N]). null если не уверен.
   - "source_quote": точная цитата из договора (1-3 предложения), которая стала источником пункта.
 
-  - "category": классификатор пункта (один из ниже). null если не уверен.
-      'fin'   — ФИНАНСОВЫЙ: платежи (аванс, окончательный расчёт, штрафные санкции, пени).
-                Маркеры: «Аванс», «Окончательный расчёт», «Оплата», «Стоимость», «руб.», %.
-      'work'  — ПРОИЗВОДСТВЕННЫЙ: фактическое выполнение работ.
-                Маркеры: «Начало выполнения работ», «Окончание выполнения работ»,
-                «Этап N: Массинг», «ОПР», «Сдача проекта в производство».
-      'appr'  — СОГЛАСОВАНИЕ / приёмка-сдача документации и актов.
-                Маркеры: «Сдача документации», «Утверждение Заказчиком», «Подписание Акта»,
-                «Получение замечаний», «Возврат на доработку», «Экспертиза».
-      'legal' — ЮРИДИЧЕСКИЙ: вопросы самого договора как документа.
-                Маркеры: «Подписание Договора», «Заключение Договора», «Подписание ДС»,
-                «Расторжение», «Срок действия Договора».
+  - "event_type_code": код типа события договора из классификатора ниже.
+                       Это ОСНОВНОЙ способ типизации пункта. Категория (category)
+                       выводится сервером автоматически из выбранного кода.
+
+═══ КЛАССИФИКАТОР СОБЫТИЙ ДОГОВОРА (event_type_code) ═══
+
+Выбирай НАИБОЛЕЕ ТОЧНЫЙ код из списка. Если не уверен — оставь null,
+оператор поставит вручную. **Не используй legal_contract_sign** —
+это код якорного пункта, который сервер создаёт сам.
+${eventTypesHint}
+
+  - "category": **denorm от event_type_code**. Можешь не возвращать (сервер сам
+    проставит из таблицы classifier). Если возвращаешь, используй один из 7:
+      'fin'   — финансовый
+      'work'  — производственный
+      'term'  — сроковый (дедлайн, перенос, приостановка, просрочка)
+      'legal' — юридический
+      'appr'  — согласовательный
+      'comm'  — коммуникационный
+      'ctrl'  — контрольный/приёмочный
 
 ПРАВИЛО ДАТА vs СРОК:
   • Только абсолютная дата в тексте       → clause_date=YYYY-MM-DD, term_*=null
@@ -367,6 +648,24 @@ ${objectsHint}
 ПРИНЦИП: чем больше пунктов извлечёшь, тем лучше. Оператор потом подчистит лишнее в редакторе.
 Лучше 15 пунктов с разными датами, чем 3 «обобщённых».
 
+═══ ПРИВЯЗКА ПУНКТА К ЭТАПУ ДОГОВОРА ═══
+
+"stage_number" — номер этапа договора, к которому относится этот пункт. null если общий пункт.
+
+Этапы договора (выделены на проходе 1):
+${contractStagesHint}
+
+Правила:
+  • Если этапов нет (список выше пуст) — у всех clauses stage_number=null.
+  • Если в описании пункта явно упоминается «Этап 1», «Этап 2», «АГК», «ОПР» и т.п.,
+    которые совпадают с одним из этапов выше — поставь соответствующий stage_number.
+  • Авансы и окончательные расчёты по этапу — относятся к этому этапу
+    (например «Аванс 30% по Этапу 1» → stage_number=1).
+  • Общие пункты договора (обязательства сторон, юридические условия, реквизиты,
+    подписание самого договора) — stage_number=null.
+  • Якорный пункт «Дата заключения договора» не создаётся LLM — у него
+    автоматически stage_id=null на сервере.
+
 ═══ ФОРМАТ ВОЗВРАТА ═══
 
 Верни ОДИН JSON-объект:
@@ -389,13 +688,17 @@ ${objectsHint}
       "clause_date": "YYYY-MM-DD" | null,
       "term_days":   <int> | null,
       "term_type":   "working" | "calendar" | null,
-      "term_base":   null,                                  // всегда null — заполняется оператором
+      "term_base":   null,                                  // всегда null — сервер ставит сам
       "term_text":   "<оригинальная формулировка>" | null,
+      "term_ref_event_type_code": "<код из классификатора>" | null,  // см. «ПРИВЯЗКА ОТНОСИТЕЛЬНОГО СРОКА»
+      "term_ref_stage_number":    <int> | null,                       // этап источника (если специфичен)
       "description": "...",
       "note":        "..." | null,
       "source_page": <int> | null,
       "source_quote": "...",
-      "category":    "fin" | "work" | "appr" | "legal" | null
+      "event_type_code": "<код из классификатора>" | null,  // ← основной тип, см. КЛАССИФИКАТОР выше
+      "category":        "fin"|"work"|"term"|"legal"|"appr"|"comm"|"ctrl" | null,  // denorm, можно опустить
+      "stage_number":    <int> | null    // привязка к этапу договора из списка выше
     },
     ...
   ]

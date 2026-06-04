@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { useRole } from '@/lib/useRole'
 import ContactFormModal, {
   ContactFormValues,
   EMPTY_CONTACT,
@@ -18,6 +19,8 @@ type Contact = {
   phone: string | null
   is_active: boolean
   notes: string | null
+  /** FK на auth.users — если контакт = системный пользователь UI (см. WIKI 19). */
+  user_id: string | null
 }
 
 type LegalEntityOption = {
@@ -26,6 +29,7 @@ type LegalEntityOption = {
 }
 
 export default function ContactsPage() {
+  const { isUploader } = useRole()
   const [items, setItems] = useState<Contact[]>([])
   const [orgs, setOrgs] = useState<LegalEntityOption[]>([])
   const [loading, setLoading] = useState(true)
@@ -134,12 +138,14 @@ export default function ContactsPage() {
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Контакты</h1>
-        <button
-          onClick={openCreate}
-          className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-        >
-          + Добавить
-        </button>
+        {isUploader && (
+          <button
+            onClick={openCreate}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          >
+            + Добавить
+          </button>
+        )}
       </div>
 
       {/* Фильтры */}
@@ -197,7 +203,7 @@ export default function ContactsPage() {
                 <th className="px-4 py-3">Должность</th>
                 <th className="px-4 py-3">Email</th>
                 <th className="px-4 py-3">Телефон</th>
-                <th className="px-4 py-3"></th>
+                {isUploader && <th className="px-4 py-3"></th>}
               </tr>
             </thead>
             <tbody>
@@ -211,7 +217,12 @@ export default function ContactsPage() {
                   <td className="px-4 py-3 text-gray-700">
                     {orgName(c.legal_entity_id)}
                   </td>
-                  <td className="px-4 py-3 font-medium">{c.last_name}</td>
+                  <td className="px-4 py-3 font-medium">
+                    {c.user_id && (
+                      <span className="mr-1" title="Связан с системным пользователем — может авторизоваться в UI">🔐</span>
+                    )}
+                    {c.last_name}
+                  </td>
                   <td className="px-4 py-3">{c.first_name}</td>
                   <td className="px-4 py-3 text-gray-600">{c.middle_name || '—'}</td>
                   <td className="px-4 py-3 text-gray-600">{c.job_title || '—'}</td>
@@ -221,34 +232,36 @@ export default function ContactsPage() {
                   <td className="px-4 py-3 text-gray-600 font-mono text-xs">
                     {c.phone || '—'}
                   </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap">
-                    <button
-                      onClick={() => openEdit(c)}
-                      className="text-blue-600 hover:text-blue-800 mr-3"
-                    >
-                      Изменить
-                    </button>
-                    {c.is_active ? (
+                  {isUploader && (
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
                       <button
-                        onClick={() => deactivate(c)}
-                        className="text-gray-500 hover:text-gray-700"
+                        onClick={() => openEdit(c)}
+                        className="text-blue-600 hover:text-blue-800 mr-3"
                       >
-                        Деактивировать
+                        Изменить
                       </button>
-                    ) : (
-                      <button
-                        onClick={() => activate(c)}
-                        className="text-green-600 hover:text-green-800"
-                      >
-                        Активировать
-                      </button>
-                    )}
-                  </td>
+                      {c.is_active ? (
+                        <button
+                          onClick={() => deactivate(c)}
+                          className="text-gray-500 hover:text-gray-700"
+                        >
+                          Деактивировать
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => activate(c)}
+                          className="text-green-600 hover:text-green-800"
+                        >
+                          Активировать
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-6 text-center text-gray-400">
+                  <td colSpan={isUploader ? 8 : 7} className="px-4 py-6 text-center text-gray-400">
                     {items.length === 0
                       ? 'Контактов ещё нет'
                       : 'Ни один контакт не подходит под фильтры'}

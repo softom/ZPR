@@ -38,3 +38,16 @@ SUPABASE_URL              = "http://127.0.0.1:54321"
 SUPABASE_PUBLISHABLE_KEY  = ""   # клиентский ключ (Next.js, браузер) — безопасен
 SUPABASE_SECRET_KEY       = ""   # серверный ключ (Python-скрипты) — НИКОГДА не в git
 SUPABASE_DB_URL           = "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+
+# ─── Telegram (личный аккаунт через MTProto) ─────────────────────────────────
+# api_id / api_hash получают на https://my.telegram.org/apps (один раз).
+# Session-файл хранит авторизованную сессию — секрет уровня логина, в .gitignore.
+# При первом запуске telegram_listener.py попросит телефон + код подтверждения.
+
+TG_API_ID        = 0
+TG_API_HASH      = ""
+TG_SESSION_PATH  = Path(r"D:\CODE\zpr_code\.tg_session")           # для listener (long-running)
+TG_SESSION_SEND_PATH = Path(r"D:\CODE\zpr_code\.tg_session_send")  # отдельная сессия для send-only
+                                                                   # (scripts/send_telegram_protocol.py),
+                                                                   # чтобы не конфликтовать с listener
+TG_WHITELIST     = Path(r"D:\CODE\zpr_code\telegram_whitelist.yaml")

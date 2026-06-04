@@ -3,7 +3,7 @@
 import { useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import ProjectGanttView from '@/components/ProjectGanttView'
+import NewsFeed from '@/components/NewsFeed'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -305,10 +305,15 @@ export default function Home() {
         )}
       </div>
 
-      {/* ── Сводный график проекта ── */}
+      {/* ── Лента новостей проекта ── */}
       <div className="mt-8">
-        <h2 className="text-base font-semibold text-gray-800 mb-3">Сводный график проекта</h2>
-        <ProjectGanttView />
+        <div className="flex items-baseline justify-between mb-3">
+          <h2 className="text-base font-semibold text-gray-800">Новости проекта</h2>
+          <a href="/calendar" className="text-xs text-gray-400 hover:text-blue-600 transition-colors">
+            Сводный график →
+          </a>
+        </div>
+        <NewsFeed />
       </div>
 
       {/* ── Навигация ── */}
@@ -327,6 +332,11 @@ export default function Home() {
           className="block p-5 bg-white border border-gray-200 rounded-lg hover:border-blue-400 hover:shadow-sm transition">
           <p className="font-medium text-gray-900">Входящие</p>
           <p className="mt-1 text-sm text-gray-500">Входящая корреспонденция</p>
+        </a>
+        <a href="/audit"
+          className="block p-5 bg-white border border-gray-200 rounded-lg hover:border-blue-400 hover:shadow-sm transition">
+          <p className="font-medium text-gray-900">Аудит связок</p>
+          <p className="mt-1 text-sm text-gray-500">Конструктор запросов: участки без объектов, объекты без участков, аномалии</p>
         </a>
       </div>
     </div>

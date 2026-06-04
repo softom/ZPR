@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Доступ запрещён — требуется роль admin' }, { status: 403 })
   }
 
-  const { email, password, role } = await req.json()
+  const { email, password, role, name } = await req.json()
   if (!email || !EMAIL_RE.test(email)) {
     return NextResponse.json({ error: 'Неверный email' }, { status: 400 })
   }
@@ -51,11 +51,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Неверная роль' }, { status: 400 })
   }
 
+  const meta: Record<string, unknown> = { role }
+  if (typeof name === 'string' && name.trim().length > 0) {
+    meta.name = name.trim()
+  }
+
   const { data, error } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
-    user_metadata: { role },
+    user_metadata: meta,
   })
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })

@@ -6,6 +6,9 @@ import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { formatPeriodPhrase } from '@/lib/reports/periodHelpers'
 import { formatScopeLabel } from '@/lib/reports/scopeLabel'
+import ControlReportView, { type ControlReport, type ControlSection, ObjectTitle, StaleHintWarning } from './ControlReportView'
+import { type MapGeoData, getObjectAreaM2 } from './ObjectSchema'
+import ObjectCover from './ObjectCover'
 import '@uiw/react-md-editor/markdown-editor.css'
 import '@uiw/react-markdown-preview/markdown.css'
 
@@ -37,26 +40,39 @@ function AutoGrowTextarea({
   }, [value])
 
   return (
-    <textarea
-      ref={ref}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      rows={minRows}
-      placeholder={placeholder}
-      className="w-full px-3 py-2 border border-gray-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none overflow-hidden"
-    />
+    <>
+      {/* Редактируемое поле — только на экране. */}
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={minRows}
+        placeholder={placeholder}
+        className="no-print w-full px-3 py-2 border border-gray-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none overflow-hidden"
+      />
+      {/* Печатная версия. <textarea> не пагинируется: его высота
+          фиксируется в px по экранному рендеру (14px), а при печати шрифт
+          становится 10pt и ширина меняется — текст переразбивается выше
+          бокса и вылезает за рамку. Поэтому при печати выводим значение
+          обычным потоковым блоком (pre-wrap сохраняет переносы/списки как
+          введены). Рамки нет — лишний бордюр на печати не нужен. */}
+      <div className="print-only text-sm whitespace-pre-wrap break-words">
+        {value}
+      </div>
+    </>
   )
 }
 
 type Report = {
   id: string
-  period_type: 'week' | 'month'
+  period_type: 'week' | 'month' | 'control'
   period_start: string
   period_end: string
   title: string | null
   status: 'draft' | 'final'
   finalized_at: string | null
   summary_md: string | null
+  preamble: string | null
   include_financials: boolean
 }
 
@@ -96,23 +112,68 @@ type SectionStats = {
 type Section = {
   id: string
   object_id: string
+  // week/month поля (legacy 6-секционная структура — оставлены для month)
   project_movement: string | null
   achievements: string | null
   achievements_list: string | null
   next_period_tasks: string | null
   next_period_tasks_list: string | null
   risks: string | null
+  // weekly v3 поля (с 14.05.2026)
+  weekly_done_brief: string | null
+  weekly_topics_brief: string | null
+  weekly_upcoming_brief: string | null
+  // control поля
+  narrative: string | null
+  contract_summary: string | null
+  decisions: string | null
+  priority_group: 'priority' | 'secondary' | null
+  tep_deadline: string | null
   generated_at: string
   model_used: string | null
-  object: { code: string; current_name: string; contractor: string | null; active: boolean; llm_hint: string | null } | null
+  object: { code: string; current_name: string; contractor: string | null; active: boolean; llm_hint: string | null; aliases?: string[] } | null
+  recent_activity?: { tasks_active: number; topics_30d: number; events_30d: number }
+  hint_effective_at_reference?: boolean
+  lifecycle_events?: {
+    resolved: LifecycleEventLite[]
+    active_problems: LifecycleEventLite[]
+    risk_no_followup: LifecycleEventLite[]
+  }
+  tasks_done_in_period?: Array<{
+    id: string; code: string; title: string;
+    assignee_org: string | null; done_date: string; status: string
+  }>
+}
+
+type LifecycleEventLite = {
+  id: string
+  title: string
+  importance: 'high' | 'critical' | null
+  date: string | null
+  is_resolved: boolean
+  resolved_date: string | null
+  resolved_by_title: string | null
+  task_count: number
+  has_active_task: boolean
+  related_tasks?: Array<{
+    id: string
+    code: string
+    title: string
+    status: string
+    done_date: string | null
+  }>
 }
 
 type ReportFieldKey = 'project_movement' | 'achievements' | 'achievements_list'
                     | 'next_period_tasks' | 'next_period_tasks_list' | 'risks'
+                    | 'weekly_done_brief' | 'weekly_topics_brief' | 'weekly_upcoming_brief'
 
-// 6 контентных полей секции отчёта. Поля 2.1/2.2 и 3.1/3.2 группируются в UI.
-type FieldDef = { key: ReportFieldKey; title: string; group?: string }
-const SECTION_FIELDS: FieldDef[] = [
+// Контентные поля секции отчёта.
+// month → 6 полей legacy-структуры (с группировкой 2/3)
+// week  → 4 поля Weekly v3 (плоско)
+type FieldDef = { key: ReportFieldKey; title: string; group?: string; hint?: string }
+
+const MONTH_FIELDS: FieldDef[] = [
   { key: 'project_movement',       title: '1. Существующее движение проекта' },
   { key: 'achievements',           title: '2.1 Описание',        group: '2. Достижения за период' },
   { key: 'achievements_list',      title: '2.2 Основные пункты', group: '2. Достижения за период' },
@@ -120,6 +181,48 @@ const SECTION_FIELDS: FieldDef[] = [
   { key: 'next_period_tasks_list', title: '3.2 Основные пункты', group: '3. Задачи наступающего периода' },
   { key: 'risks',                  title: '4. Риски' },
 ]
+
+const WEEKLY_V3_FIELDS_UI: FieldDef[] = [
+  { key: 'project_movement',     title: 'Движение проекта за неделю',  hint: '1 абзац (2-4 предложения): что движется на объекте сейчас.' },
+  { key: 'weekly_done_brief',    title: '✓ Выполнено / зафиксировано', hint: 'Markdown-список с маркером "* **DD.MM** — событие/факт".' },
+  { key: 'weekly_topics_brief',  title: 'Обобщение тем собраний',      hint: 'Связный абзац курсивом — что обсуждалось на собраниях.' },
+  { key: 'weekly_upcoming_brief', title: '🔜 Предстоит',                hint: 'Markdown-список задач со сроками и исполнителями.' },
+]
+
+// Для обратной совместимости со старым кодом ниже:
+const SECTION_FIELDS = MONTH_FIELDS
+
+// Маппинг поля → какие lifecycle-категории важных событий показывать в его
+// «контекст-сводке». Для полей без релевантной семантики (темы / задачи будущего) — [].
+type LifecycleKind = 'resolved' | 'active_problems' | 'risk_no_followup'
+const FIELD_LIFECYCLE_KINDS: Record<ReportFieldKey, LifecycleKind[]> = {
+  // 6-секционная (week/month legacy):
+  // В блоке «Движение» — все три типа (полная картина: что сделано, что в работе, факты)
+  project_movement:       ['resolved', 'active_problems', 'risk_no_followup'],
+  // Достижения: resolved (закрытые проблемы) + risk_no_followup (положительные
+  // факты без задачи — «получено», «согласовано» — это тоже достижения).
+  achievements:           ['resolved', 'risk_no_followup'],
+  achievements_list:      ['resolved', 'risk_no_followup'],
+  next_period_tasks:      [],
+  next_period_tasks_list: [],
+  // Риски: только реальный «незакрытый негатив». «risk_no_followup» не
+  // обязательно негатив — LLM сам различает по title (см. промпт).
+  risks:                  ['resolved', 'active_problems', 'risk_no_followup'],
+  // Weekly v3:
+  weekly_done_brief:      ['resolved', 'risk_no_followup'],
+  weekly_topics_brief:    [],
+  weekly_upcoming_brief:  ['active_problems'],
+}
+
+const LIFECYCLE_LABELS: Record<LifecycleKind, { icon: string; label: string; color: string }> = {
+  resolved:         { icon: '✓',  label: 'Решено за период',                color: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
+  active_problems:  { icon: '🔓', label: 'В работе (есть задача)',           color: 'bg-amber-50 text-amber-800 border-amber-200' },
+  // Эта категория — важные ФАКТЫ без задачи-followup. НЕ обязательно негативные!
+  // «Получены ТУ», «согласован вариант», «утверждены показатели» — позитивные/
+  // нейтральные. LLM должен использовать их как факты для нарратива, не как
+  // автоматические риски.
+  risk_no_followup: { icon: '📌', label: 'Важные факты без задачи',          color: 'bg-sky-50 text-sky-800 border-sky-200' },
+}
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -151,8 +254,10 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
   useEffect(() => { load() }, [id])
 
-  async function load() {
-    setLoading(true)
+  // load(silent=true) — обновляет данные без перерисовки всей страницы в режиме
+  // "Загрузка…". Используется кнопками 🔄 в сводках контекста.
+  async function load(silent = false) {
+    if (!silent) setLoading(true)
     setError('')
     const [rRes, sRes] = await Promise.all([
       fetch(`/api/reports/${id}`).then((r) => r.json()),
@@ -160,7 +265,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     ])
     if (rRes.error) {
       setError(rRes.error)
-      setLoading(false)
+      if (!silent) setLoading(false)
       return
     }
     setReport(rRes.report)
@@ -169,8 +274,40 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     setSummaryDraft(rRes.report?.summary_md ?? '')
     setSummaryDirty(false)
     setDrafts({})
-    setLoading(false)
+    if (!silent) setLoading(false)
   }
+
+  // Refresh контекста без полного «Загрузка…» — для кнопок 🔄 в сводках
+  const [refreshingContext, setRefreshingContext] = useState(false)
+  // GIS-данные для печатной формы (общий план комплекса).
+  // Загружаются один раз и шерятся между всеми ObjectSchema-блоками отчёта.
+  const [geoData, setGeoData] = useState<MapGeoData | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/reports/map/geojson')
+        if (!res.ok) return
+        const data = await res.json()
+        if (!cancelled) setGeoData(data as MapGeoData)
+      } catch { /* tolerate */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  async function refreshContext() {
+    setRefreshingContext(true)
+    try { await load(true) } finally { setRefreshingContext(false) }
+  }
+
+  // Активная закладка объекта (для навигации без прокрутки).
+  // null = «все объекты» (для печати/обзора).
+  const [activeObjectId, setActiveObjectId] = useState<string | null>(null)
+  // При печати — сбрасываем активный таб, чтобы все секции попали в DOM (и на бумагу).
+  useEffect(() => {
+    const beforePrint = () => setActiveObjectId(null)
+    window.addEventListener('beforeprint', beforePrint)
+    return () => window.removeEventListener('beforeprint', beforePrint)
+  }, [])
 
   async function generateSummary() {
     setSummaryGenerating(true)
@@ -357,6 +494,17 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   if (error) return <div className="max-w-5xl mx-auto p-6 text-red-600">{error}</div>
   if (!report) return null
 
+  // control-отчёт (Справка ТЗ) рендерится отдельным компонентом
+  if (report.period_type === 'control') {
+    return (
+      <ControlReportView
+        report={report as unknown as ControlReport}
+        sections={sections as unknown as ControlSection[]}
+        reload={load}
+      />
+    )
+  }
+
   const isFinal = report.status === 'final'
 
   return (
@@ -511,9 +659,59 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         )}
       </article>
 
+      {/* Закладки по объектам — навигация без прокрутки. При печати скрыты,
+          все секции рендерятся в DOM (CSS .screen-hidden показывает их). */}
+      {sections.length > 1 && (
+        <div className="no-print mb-4 sticky top-0 z-10 bg-gray-50 border-b border-gray-200 -mx-6 px-6 py-2 overflow-x-auto">
+          <div className="flex gap-1 flex-nowrap">
+            <button
+              onClick={() => setActiveObjectId(null)}
+              className={`px-3 py-1 rounded text-xs whitespace-nowrap border ${
+                activeObjectId === null
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
+              }`}
+              title="Показать все объекты — для прокрутки и печати"
+            >
+              📑 Все ({sections.length})
+            </button>
+            {sections.map((s) => {
+              if (!s.object) return null
+              const active = activeObjectId === s.object_id
+              // Маркеры наличия событий для tab
+              const lc = s.lifecycle_events
+              const hasResolved = (lc?.resolved.length ?? 0) > 0
+              const hasActive = (lc?.active_problems.length ?? 0) > 0
+              const hasRisk = (lc?.risk_no_followup.length ?? 0) > 0
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => setActiveObjectId(s.object_id)}
+                  className={`px-3 py-1 rounded text-xs whitespace-nowrap border flex items-center gap-1 ${
+                    active
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
+                  }`}
+                  title={s.object?.current_name ?? ''}
+                >
+                  <span className="font-mono">{s.object?.code}</span>
+                  {hasResolved && <span title="есть resolved" className={active ? 'text-emerald-200' : 'text-emerald-600'}>✓</span>}
+                  {hasActive && <span title="active problems" className={active ? 'text-amber-200' : 'text-amber-600'}>🔓</span>}
+                  {hasRisk && <span title="risks without followup" className={active ? 'text-red-200' : 'text-red-600'}>🔴</span>}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="space-y-6">
         {sections.map((s) => {
           if (!s.object) return null
+          // Tab-фильтр: если выбран конкретный объект, остальные не рендерим.
+          // При печати beforeprint-листенер сбрасывает activeObjectId=null,
+          // поэтому в бумагу попадают все.
+          if (activeObjectId !== null && activeObjectId !== s.object_id) return null
           const dirty = isDirty(s)
           const objStats = stats.find((st) => st.object_id === s.object_id)
           return (
@@ -521,11 +719,54 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
               key={s.id}
               className="object-report bg-white rounded shadow border border-gray-200 p-6"
             >
+              {/* Титульный лист объекта — ТОЛЬКО при печати. Идёт ПЕРВЫМ
+                  листом объекта, ПЕРЕД содержанием (п.1.1…). Вверху —
+                  «Название объекта» (как на листе с п.1.1) + площадь участка,
+                  ниже SVG-схема комплекса с красным выделением участка.
+                  Рендерим ВСЕГДА (s.object гарантирован выше): даже если гео
+                  ещё не загрузилось — титульный лист с названием будет у
+                  каждого объекта. Схему/площадь показываем при наличии geoData. */}
+              {s.object && (
+                <div className="print-only print-page-break-after object-title-page">
+                  <div className="mb-3">
+                    <h1 className="text-2xl font-bold text-gray-900">
+                      <ObjectTitle code={s.object.code} currentName={s.object.current_name} />
+                    </h1>
+                    {s.object.aliases && s.object.aliases.length > 0 && (
+                      <p className="text-xs text-gray-500 mt-0.5 italic">
+                        {s.object.aliases.join(', ')}
+                      </p>
+                    )}
+                    {(() => {
+                      const areaM2 = geoData ? getObjectAreaM2(geoData, s.object.code) : 0
+                      if (areaM2 <= 0) return null
+                      return (
+                        <p className="text-sm text-gray-700 mt-1">
+                          Площадь участка: <strong>{Math.round(areaM2).toLocaleString('ru-RU')} м²</strong>
+                        </p>
+                      )
+                    })()}
+                  </div>
+                  {/* Обложка объекта: PNG из Storage report-covers/<номер>.png,
+                      где номер = префикс кода объекта (001, 101, 301…).
+                      При отсутствии файла — фолбэк на SVG-схему. */}
+                  <ObjectCover
+                    code={s.object.code}
+                    objectName={s.object.current_name}
+                    geoData={geoData}
+                  />
+                </div>
+              )}
               <header className="border-b pb-3 mb-4 flex items-baseline justify-between gap-3">
                 <div>
                   <h2 className="text-xl font-bold text-gray-900">
-                    {s.object.code} — {s.object.current_name}
+                    <ObjectTitle code={s.object.code} currentName={s.object.current_name} />
                   </h2>
+                  {s.object.aliases && s.object.aliases.length > 0 && (
+                    <p className="text-xs text-gray-500 mt-0.5 italic">
+                      {s.object.aliases.join(', ')}
+                    </p>
+                  )}
                   {s.object.contractor && (
                     <p className="text-xs text-gray-500 mt-0.5">Подрядчик: {s.object.contractor}</p>
                   )}
@@ -585,13 +826,16 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
               {/* Метаданные объекта: блоки по подрядчикам.
                   Структура внутри каждого блока: имя подрядчика → список договоров →
-                  per-contractor статистика задач (на этом объекте) внизу. */}
-              {objStats && objStats.contractors.length > 0 && (
+                  per-contractor статистика задач (на этом объекте) внизу.
+                  Группа «Без договора» (contractor_entity_id=null) скрыта —
+                  отчёт ведётся в разрезе объекта, а не договора. Привязка задач
+                  к подрядчикам пока не полная, акцентировать внимание не нужно. */}
+              {objStats && objStats.contractors.filter((g) => g.contractor_entity_id).length > 0 && (
                 <div className="mb-4 space-y-2">
-                  {objStats.contractors.map((g) => (
+                  {objStats.contractors.filter((g) => g.contractor_entity_id).map((g) => (
                     <div key={g.contractor_entity_id ?? 'orphan'} className="bg-gray-50 border border-gray-200 rounded p-3">
                       <div className="text-sm font-semibold text-gray-800 mb-2">
-                        {g.contractor_entity_id ? '👤' : '⚠️'} {g.contractor_name}
+                        👤 {g.contractor_name}
                       </div>
 
                       {g.contracts.length > 0 ? (
@@ -632,6 +876,22 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                 </div>
               )}
 
+              {/* «✓ Выполнено за отчётный период» — детерминированный блок:
+                  закрытые задачи + resolved важные события.
+                  В UI рендерится здесь (для удобства редактирования);
+                  при печати — на отдельной странице после п.4 (см. ниже). */}
+              <div className="no-print">
+                <DonePeriodBlock section={s} />
+              </div>
+
+              {/* Warning: устаревший llm_hint (утверждает паузу при свежей активности) */}
+              <StaleHintWarning
+                section={s}
+                reportPeriodStart={report.period_start}
+                onSaved={load}
+              />
+
+
               {/* Контекст для LLM (objects.llm_hint) — приоритетная подсказка
                   владельца, не выводится в финальный отчёт. */}
               {s.object && !isFinal && (() => {
@@ -639,7 +899,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                 const currentValue = draftValue !== undefined ? draftValue : (s.object.llm_hint ?? '')
                 const dirty = draftValue !== undefined && draftValue !== (s.object.llm_hint ?? '')
                 return (
-                  <details className="mb-4 bg-amber-50/40 border border-amber-200 rounded">
+                  <details className="no-print mb-4 bg-amber-50/40 border border-amber-200 rounded">
                     <summary className="px-3 py-2 text-sm font-medium text-amber-900 cursor-pointer hover:bg-amber-100 select-none">
                       📝 Контекст для LLM (не попадает в отчёт)
                       {(s.object.llm_hint ?? '').trim() && (
@@ -678,9 +938,14 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
               <div className="space-y-5">
                 {/* Сначала рендерим поля без group (1, 4), затем 2 и 3 как группы. */}
                 {(() => {
+                  // Выбираем набор полей по типу отчёта: week → v3 (плоско),
+                  // month → 6 полей legacy с группировкой 2.1/2.2/3.1/3.2.
+                  const activeFields: FieldDef[] = report.period_type === 'week'
+                    ? WEEKLY_V3_FIELDS_UI
+                    : MONTH_FIELDS
                   // Группируем по f.group: undefined → одиночные, иначе 2/3
                   const groupOrder: Array<{ group?: string; fields: FieldDef[] }> = []
-                  for (const f of SECTION_FIELDS) {
+                  for (const f of activeFields) {
                     if (!f.group) {
                       groupOrder.push({ fields: [f] })
                     } else {
@@ -699,8 +964,17 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                           const fieldGenKey = `${s.id}|${f.key}`
                           const isGenThisField = genFieldKey === fieldGenKey
                           const fieldDirty = drafts[s.id]?.[f.key] !== undefined
+                          const kinds = FIELD_LIFECYCLE_KINDS[f.key] ?? []
                           return (
                             <div key={f.key}>
+                              {/* Сводка важных событий для этого блока — клик по событию открывает /events/{id}
+                                  для прикрепления задачи. После правок — кнопка ✨ перегенерирует с новым контекстом. */}
+                              <BlockContextEvents
+                                kinds={kinds}
+                                lifecycle={s.lifecycle_events}
+                                onRefresh={refreshContext}
+                                refreshing={refreshingContext}
+                              />
                               <div className="flex items-baseline justify-between gap-2 mb-1">
                                 <h4 className="text-sm font-semibold text-emerald-700 uppercase tracking-wider">
                                   {f.title}
@@ -751,10 +1025,24 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                 })()}
               </div>
 
+              {/* Печатный вариант «✓ Выполнено» — на отдельной странице
+                  после п.4 (page-break-before: always через CSS).
+                  ВАЖНО: рендерим обёртку с разрывом ТОЛЬКО если есть контент.
+                  Иначе пустой div с page-break-before форсит лишнюю пустую
+                  страницу («Пустой лист») перед разрывом самого объекта. */}
+              {((s.tasks_done_in_period?.length ?? 0) > 0 ||
+                (s.lifecycle_events?.resolved?.length ?? 0) > 0) && (
+                <div className="print-only print-page-break-before">
+                  <DonePeriodBlock section={s} />
+                </div>
+              )}
+
               {s.generated_at && (
                 <p className="text-xs text-gray-400 mt-3 pt-3 border-t">
-                  Последняя генерация: {new Date(s.generated_at).toLocaleString('ru-RU')}
-                  {s.model_used && ` · ${s.model_used}`}
+                  Дата формирования раздела и последних правок: {new Date(s.generated_at).toLocaleString('ru-RU', {
+                    day: '2-digit', month: '2-digit', year: 'numeric',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                  })}
                 </p>
               )}
             </article>
@@ -772,5 +1060,214 @@ function StatCard({ label, value, sub, color }: { label: string; value: number; 
       <div className={`text-xl font-semibold ${color}`}>{value}</div>
       {sub && <div className="text-gray-400 text-[10px] mt-0.5">{sub}</div>}
     </div>
+  )
+}
+
+// Сводка важных событий, влияющих на конкретный блок отчёта (выше LLM-поля).
+// Каждое событие — кликабельное → открывает /events/{id} в новой вкладке,
+// где можно прикрепить задачу (raised_from) или resolved_by-связь.
+// После работы с событиями пользователь возвращается и нажимает ✨ — LLM получает
+// обновлённый контекст и перегенерирует раздел.
+function BlockContextEvents({
+  kinds, lifecycle, onRefresh, refreshing,
+}: {
+  kinds: LifecycleKind[]
+  lifecycle?: {
+    resolved: LifecycleEventLite[]
+    active_problems: LifecycleEventLite[]
+    risk_no_followup: LifecycleEventLite[]
+  }
+  onRefresh?: () => void | Promise<void>
+  refreshing?: boolean
+}) {
+  if (kinds.length === 0 || !lifecycle) return null
+  const buckets = kinds.map((k) => ({ k, events: lifecycle[k] ?? [] }))
+  const total = buckets.reduce((s, b) => s + b.events.length, 0)
+  if (total === 0) return null
+
+  return (
+    <details className="no-print mb-2 bg-gray-50 border border-gray-200 rounded text-xs">
+      <summary className="px-2 py-1 cursor-pointer hover:bg-gray-100 select-none flex items-center gap-2">
+        <span className="text-gray-500">📌 Контекст для LLM:</span>
+        {buckets.map((b) => b.events.length > 0 && (
+          <span key={b.k} className={`px-1.5 py-0.5 rounded border ${LIFECYCLE_LABELS[b.k].color}`}>
+            {LIFECYCLE_LABELS[b.k].icon} {LIFECYCLE_LABELS[b.k].label}: {b.events.length}
+          </span>
+        ))}
+        {onRefresh && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault()        // не разворачивать details
+              e.stopPropagation()
+              void onRefresh()
+            }}
+            disabled={refreshing}
+            className="px-1.5 py-0.5 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 text-[11px]"
+            title="Обновить список событий из БД (после привязки/закрытия задач)"
+          >
+            {refreshing ? '⏳' : '🔄'} Обновить
+          </button>
+        )}
+        <span className="text-gray-400 ml-auto text-[10px]">
+          клик по событию → редактор связей · после правок: 🔄 список · ✨ генерация
+        </span>
+      </summary>
+      <div className="px-2 pb-2 pt-1 space-y-2">
+        {buckets.map((b) => b.events.length > 0 && (
+          <div key={b.k}>
+            <div className="text-[11px] font-semibold text-gray-600 mb-1">
+              {LIFECYCLE_LABELS[b.k].icon} {LIFECYCLE_LABELS[b.k].label} ({b.events.length})
+            </div>
+            <ul className="space-y-0.5">
+              {b.events.slice(0, 12).map((e) => (
+                <li key={e.id}>
+                  <a
+                    href={`/events/${e.id}`}
+                    target="_blank"
+                    rel="noopener"
+                    className="block px-1.5 py-0.5 rounded hover:bg-white hover:shadow-sm border border-transparent hover:border-gray-200 text-gray-700"
+                    title={`${e.title} — открыть в новой вкладке`}
+                  >
+                    {e.importance === 'critical' && <span className="text-red-600">★</span>}
+                    {e.importance === 'high' && <span className="text-amber-600">★</span>}{' '}
+                    {e.date && <span className="font-mono text-gray-500">[{e.date}]</span>}{' '}
+                    <span className="text-gray-900">{e.title}</span>
+                    {e.is_resolved && e.resolved_date && (
+                      <span className="ml-1 text-emerald-700 text-[10px]">
+                        ✓ решено {e.resolved_date}
+                      </span>
+                    )}
+                    {!e.is_resolved && e.has_active_task && (
+                      <span className="ml-1 text-amber-700 text-[10px]">
+                        в работе: {e.task_count} задач{e.task_count === 1 ? 'а' : ''}
+                      </span>
+                    )}
+                    {!e.is_resolved && e.task_count === 0 && (
+                      <span className="ml-1 text-red-700 text-[10px]">
+                        🔧 нет задачи-решения
+                      </span>
+                    )}
+                  </a>
+                  {/* Связанные задачи (raised_from-task) — для resolved-события каждая
+                      закрытая задача = доп.положительный факт для отчёта. */}
+                  {(e.related_tasks?.length ?? 0) > 0 && (
+                    <ul className="ml-6 mt-0.5 mb-1 space-y-0.5">
+                      {(e.related_tasks ?? []).map((t) => {
+                        const isClosed = ['done', 'closed'].includes(t.status)
+                        const isCancelled = t.status === 'cancelled'
+                        return (
+                          <li key={t.id}>
+                            <a
+                              href={`/tasks?open=${t.id}`}
+                              target="_blank"
+                              rel="noopener"
+                              className="inline-flex items-baseline gap-1 px-1.5 py-0.5 rounded border border-transparent hover:bg-white hover:border-gray-200 text-[11px]"
+                              title={`Задача ${t.code} — открыть на странице задач`}
+                            >
+                              <span className={
+                                isClosed ? 'text-emerald-700' :
+                                isCancelled ? 'text-gray-400' :
+                                'text-amber-700'
+                              }>
+                                {isClosed ? '✓' : isCancelled ? '✗' : '⏳'}
+                              </span>
+                              <span className="font-mono text-gray-500">{t.code}</span>
+                              <span className={isCancelled ? 'text-gray-400 line-through' : 'text-gray-700'}>
+                                {t.title}
+                              </span>
+                              {isClosed && t.done_date && (
+                                <span className="text-emerald-700 text-[10px]">
+                                  закрыта {t.done_date}
+                                </span>
+                              )}
+                            </a>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                </li>
+              ))}
+              {b.events.length > 12 && (
+                <li className="text-[10px] text-gray-400 px-1.5">
+                  … и ещё {b.events.length - 12}. Полный список в LLM-контексте.
+                </li>
+              )}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+// Блок «✓ Выполнено за отчётный период» — детерминированный (из БД),
+// показывает закрытые задачи + resolved важные события. Виден в UI и при печати.
+function DonePeriodBlock({ section }: { section: Section }) {
+  const tasks = section.tasks_done_in_period ?? []
+  const resolvedEvents = section.lifecycle_events?.resolved ?? []
+  if (tasks.length === 0 && resolvedEvents.length === 0) return null
+  const obj = section.object
+
+  return (
+    <section className="mb-4 bg-emerald-50/40 border border-emerald-200 rounded p-3">
+      {/* Титул на печатной форме (схема и название объекта вынесены в
+          титульный лист — см. рендер перед article.object-report). */}
+      {obj && (
+        <h2 className="print-only text-lg font-bold text-gray-900 mb-2 pb-2 border-b border-emerald-300">
+          По объекту <ObjectTitle code={obj.code} currentName={obj.current_name} /> за отчётный период
+        </h2>
+      )}
+      <div className="text-sm font-semibold text-emerald-900 mb-2">
+        ✓ За отчётный период выполнено
+      </div>
+      <ul className="space-y-1 text-sm">
+        {/* Сначала resolved-проблемы (важные) — выделяем как ★ */}
+        {resolvedEvents.map((e) => (
+          <li key={`e-${e.id}`} className="text-gray-800">
+            <span className="text-emerald-700 mr-1">★ ✓</span>
+            {e.date && <span className="font-mono text-gray-500 text-xs">[{e.date}]</span>}{' '}
+            <a
+              href={`/events/${e.id}`}
+              target="_blank"
+              rel="noopener"
+              className="text-gray-900 hover:underline"
+              title="Открыть событие в новой вкладке"
+            >
+              {e.title}
+            </a>
+            {e.resolved_date && (
+              <span className="ml-1 text-[11px] text-emerald-700">
+                → решено {e.resolved_date}
+              </span>
+            )}
+          </li>
+        ))}
+        {/* Затем обычные закрытые задачи */}
+        {tasks.map((t) => (
+          <li key={`t-${t.id}`} className="text-gray-700">
+            <span className="text-emerald-700 mr-1">✓</span>
+            <span className="font-mono text-gray-500 text-xs">[{t.done_date}]</span>{' '}
+            <a
+              href={`/tasks?open=${t.id}`}
+              target="_blank"
+              rel="noopener"
+              className="hover:underline"
+              title={`Задача ${t.code}`}
+            >
+              {t.title}
+            </a>
+            {t.assignee_org && (
+              <span className="ml-1 text-[11px] text-gray-500">— {t.assignee_org}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="text-[10px] text-gray-500 mt-2 no-print">
+        Список формируется автоматически из БД. ★ — закрытие важной проблемы
+        (resolved event), ✓ — закрытая задача. Клик → карточка.
+      </p>
+    </section>
   )
 }

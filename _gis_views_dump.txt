@@ -1,0 +1,279 @@
+﻿-- === gis_plots ===
+ WITH current_assignment AS (
+         SELECT DISTINCT ON (plot_polygon_assignments.plot_id) plot_polygon_assignments.plot_id,
+            plot_polygon_assignments.boundary_type,
+            plot_polygon_assignments.version_in_type,
+            plot_polygon_assignments.valid_from
+           FROM plot_polygon_assignments
+          WHERE plot_polygon_assignments.valid_to IS NULL
+          ORDER BY plot_polygon_assignments.plot_id, plot_polygon_assignments.valid_from DESC, plot_polygon_assignments.boundary_type DESC
+        ), plot_geom AS (
+         SELECT p_1.id AS plot_id,
+            st_multi(st_collect(pp.geom_4326 ORDER BY ppa.sequence_no)) AS geom_4326,
+            st_multi(st_collect(pp.geom ORDER BY ppa.sequence_no)) AS geom_sk63,
+            sum(pp.area_calc_m2) AS area_m2,
+            count(pp.id) AS polygon_count
+           FROM plots p_1
+             JOIN plot_polygon_assignments ppa ON ppa.plot_id = p_1.id AND ppa.valid_to IS NULL
+             JOIN plot_polygons pp ON pp.id = ppa.polygon_id
+          WHERE p_1.active = true
+          GROUP BY p_1.id
+        ), plot_objs AS (
+         SELECT p_1.id AS plot_id,
+            string_agg(DISTINCT o.code, ', '::text ORDER BY o.code) AS objects_csv,
+            count(DISTINCT o.id) AS objects_count
+           FROM plots p_1
+             LEFT JOIN objects o ON o.id = p_1.object_id OR p_1.object_id IS NULL AND (o.id IN ( SELECT foo.object_id
+                   FROM functional_object_objects foo
+                  WHERE foo.functional_object_id = p_1.functional_object_id))
+          GROUP BY p_1.id
+        ), loads_pivot AS (
+         SELECT v_engineering_loads_by_functional.functional_object_id,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'water'::text) AS load_water,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'sewer'::text) AS load_sewer,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'storm'::text) AS load_storm,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'heat'::text) AS load_heat,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'gas'::text) AS load_gas,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'power'::text) AS load_power,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'telecom'::text) AS load_telecom,
+            string_agg(((v_engineering_loads_by_functional.network::text || ':'::text) || v_engineering_loads_by_functional.total_load::text) || COALESCE(' '::text || v_engineering_loads_by_functional.units, ''::text), ' / '::text ORDER BY (v_engineering_loads_by_functional.network::text)) AS loads_summary
+           FROM v_engineering_loads_by_functional
+          GROUP BY v_engineering_loads_by_functional.functional_object_id
+        ), loads_pivot_plot AS (
+         SELECT engineering_loads.plot_id,
+            sum(engineering_loads.load_value) FILTER (WHERE engineering_loads.network::text = 'water'::text) AS load_water_plot,
+            sum(engineering_loads.load_value) FILTER (WHERE engineering_loads.network::text = 'sewer'::text) AS load_sewer_plot,
+            sum(engineering_loads.load_value) FILTER (WHERE engineering_loads.network::text = 'storm'::text) AS load_storm_plot,
+            sum(engineering_loads.load_value) FILTER (WHERE engineering_loads.network::text = 'heat'::text) AS load_heat_plot,
+            sum(engineering_loads.load_value) FILTER (WHERE engineering_loads.network::text = 'gas'::text) AS load_gas_plot,
+            sum(engineering_loads.load_value) FILTER (WHERE engineering_loads.network::text = 'power'::text) AS load_power_plot
+           FROM engineering_loads
+          WHERE engineering_loads.plot_id IS NOT NULL
+          GROUP BY engineering_loads.plot_id
+        )
+ SELECT row_number() OVER (ORDER BY p.code)::integer AS objectid,
+    p.id,
+    p.code,
+    p.name,
+    p.role::text AS role,
+    p.cadastral_number,
+    p.permitted_use,
+    fo.zone_code AS functional_zone_code,
+    fo.name AS functional_name,
+    fo.kind::text AS functional_kind,
+    COALESCE(po.objects_csv, ''::text) AS objects_csv,
+    COALESCE(po.objects_count, 0::bigint)::integer AS objects_count,
+    ca.boundary_type AS current_boundary_type,
+    ca.version_in_type AS current_version,
+    pg.area_m2,
+    pg.polygon_count::integer AS polygon_count,
+    lp.load_water,
+    lp.load_sewer,
+    lp.load_storm,
+    lp.load_heat,
+    lp.load_gas,
+    lp.load_power,
+    lp.load_telecom,
+    COALESCE(lp.loads_summary, ''::text) AS loads_summary,
+    lpp.load_water_plot,
+    lpp.load_sewer_plot,
+    lpp.load_storm_plot,
+    lpp.load_heat_plot,
+    lpp.load_gas_plot,
+    lpp.load_power_plot,
+    pg.geom_4326,
+    pg.geom_sk63
+   FROM plots p
+     LEFT JOIN functional_objects fo ON fo.id = p.functional_object_id
+     LEFT JOIN current_assignment ca ON ca.plot_id = p.id
+     JOIN plot_geom pg ON pg.plot_id = p.id
+     LEFT JOIN plot_objs po ON po.plot_id = p.id
+     LEFT JOIN loads_pivot lp ON lp.functional_object_id = p.functional_object_id
+     LEFT JOIN loads_pivot_plot lpp ON lpp.plot_id = p.id
+  WHERE p.active = true;
+
+-- === gis_objects ===
+ WITH obj_plots AS (
+         SELECT obj_id.obj_id AS object_id,
+            v.plot_id,
+            v.geom_4326_multi AS geom_4326,
+            v.geom_sk63_multi AS geom_sk63,
+            v.area_calc_m2
+           FROM v_plots_current v,
+            LATERAL unnest(v.effective_object_ids) obj_id(obj_id)
+          WHERE v.geom_4326_multi IS NOT NULL
+        ), obj_geom AS (
+         SELECT obj_plots.object_id,
+            st_multi(st_union(obj_plots.geom_4326)) AS geom_4326,
+            st_multi(st_union(obj_plots.geom_sk63)) AS geom_sk63,
+            sum(obj_plots.area_calc_m2) AS area_m2,
+            count(DISTINCT obj_plots.plot_id)::integer AS plots_count
+           FROM obj_plots
+          GROUP BY obj_plots.object_id
+        )
+ SELECT row_number() OVER (ORDER BY o.code)::integer AS objectid,
+    o.id,
+    o.code,
+    o.current_name AS name,
+    o.contractor,
+    o.color,
+    COALESCE(og.plots_count, 0) AS plots_count,
+    COALESCE(og.area_m2, 0::numeric) AS area_m2,
+    og.geom_4326,
+    og.geom_sk63
+   FROM objects o
+     LEFT JOIN obj_geom og ON og.object_id = o.id
+  WHERE o.active = true AND og.geom_4326 IS NOT NULL;
+
+-- === gis_functional_zones ===
+ WITH zone_objs AS (
+         SELECT foo.functional_object_id,
+            string_agg(o.code, ', '::text ORDER BY o.code) AS objects_csv,
+            count(o.id)::integer AS objects_count
+           FROM functional_object_objects foo
+             JOIN objects o ON o.id = foo.object_id
+          GROUP BY foo.functional_object_id
+        ), zone_geom AS (
+         SELECT fo_1.id AS functional_object_id,
+            st_multi(st_union(pp.geom_4326)) AS geom_4326,
+            st_multi(st_union(pp.geom)) AS geom_sk63,
+            sum(pp.area_calc_m2) AS area_m2,
+            count(DISTINCT p.id)::integer AS plots_count
+           FROM functional_objects fo_1
+             JOIN plots p ON p.functional_object_id = fo_1.id AND p.active = true
+             JOIN plot_polygon_assignments ppa ON ppa.plot_id = p.id AND ppa.valid_to IS NULL
+             JOIN plot_polygons pp ON pp.id = ppa.polygon_id
+          WHERE fo_1.active = true
+          GROUP BY fo_1.id
+        ), zone_loads AS (
+         SELECT v_engineering_loads_by_functional.functional_object_id,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'water'::text) AS load_water,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'sewer'::text) AS load_sewer,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'storm'::text) AS load_storm,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'heat'::text) AS load_heat,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'gas'::text) AS load_gas,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'power'::text) AS load_power,
+            max(v_engineering_loads_by_functional.total_load) FILTER (WHERE v_engineering_loads_by_functional.network::text = 'telecom'::text) AS load_telecom,
+            string_agg(((v_engineering_loads_by_functional.network::text || ':'::text) || v_engineering_loads_by_functional.total_load::text) || COALESCE(' '::text || v_engineering_loads_by_functional.units, ''::text), ' / '::text ORDER BY (v_engineering_loads_by_functional.network::text)) AS loads_summary
+           FROM v_engineering_loads_by_functional
+          GROUP BY v_engineering_loads_by_functional.functional_object_id
+        )
+ SELECT row_number() OVER (ORDER BY fo.zone_code)::integer AS objectid,
+    fo.id,
+    fo.zone_code,
+    fo.name AS zone_name,
+    fo.kind::text AS kind,
+    fo.queue,
+    COALESCE(zo.objects_csv, ''::text) AS objects_csv,
+    COALESCE(zo.objects_count, 0) AS objects_count,
+    zl.load_water,
+    zl.load_sewer,
+    zl.load_storm,
+    zl.load_heat,
+    zl.load_gas,
+    zl.load_power,
+    zl.load_telecom,
+    COALESCE(zl.loads_summary, ''::text) AS loads_summary,
+    zg.area_m2,
+    zg.plots_count,
+    zg.geom_4326,
+    zg.geom_sk63
+   FROM functional_objects fo
+     LEFT JOIN zone_objs zo ON zo.functional_object_id = fo.id
+     LEFT JOIN zone_loads zl ON zl.functional_object_id = fo.id
+     JOIN zone_geom zg ON zg.functional_object_id = fo.id
+  WHERE fo.active = true;
+
+-- === gis_object_polygons ===
+ SELECT row_number() OVER (ORDER BY og.created_at, og.id)::integer AS objectid,
+    og.id,
+    og.object_id,
+    o.code AS object_code,
+    o.current_name AS object_name,
+    og.kind::text AS kind,
+    og.name,
+    og.source,
+    og.properties,
+    og.valid_from,
+    st_multi(og.geom_4326)::geometry(MultiPolygon,4326) AS geom_4326,
+    st_multi(og.geom)::geometry(MultiPolygon,970634) AS geom_sk63
+   FROM object_geometries og
+     LEFT JOIN objects o ON o.id = og.object_id
+  WHERE (og.kind = ANY (ARRAY['building'::geometry_kind, 'zone'::geometry_kind, 'other'::geometry_kind])) AND og.valid_to IS NULL AND (geometrytype(og.geom) = ANY (ARRAY['POLYGON'::text, 'MULTIPOLYGON'::text]));
+
+-- === gis_object_lines ===
+ SELECT row_number() OVER (ORDER BY og.created_at, og.id)::integer AS objectid,
+    og.id,
+    og.object_id,
+    o.code AS object_code,
+    o.current_name AS object_name,
+    og.kind::text AS kind,
+    og.name,
+    og.source,
+    og.properties,
+    og.valid_from,
+    st_multi(og.geom_4326)::geometry(MultiLineString,4326) AS geom_4326,
+    st_multi(og.geom)::geometry(MultiLineString,970634) AS geom_sk63
+   FROM object_geometries og
+     LEFT JOIN objects o ON o.id = og.object_id
+  WHERE (og.kind = ANY (ARRAY['road'::geometry_kind, 'utility_line'::geometry_kind])) AND og.valid_to IS NULL AND (geometrytype(og.geom) = ANY (ARRAY['LINESTRING'::text, 'MULTILINESTRING'::text]));
+
+-- === gis_object_points ===
+ SELECT row_number() OVER (ORDER BY og.created_at, og.id)::integer AS objectid,
+    og.id,
+    og.object_id,
+    o.code AS object_code,
+    o.current_name AS object_name,
+    og.kind::text AS kind,
+    og.name,
+    og.source,
+    og.properties,
+    og.valid_from,
+    st_multi(og.geom_4326)::geometry(MultiPoint,4326) AS geom_4326,
+    st_multi(og.geom)::geometry(MultiPoint,970634) AS geom_sk63
+   FROM object_geometries og
+     LEFT JOIN objects o ON o.id = og.object_id
+  WHERE (og.kind = ANY (ARRAY['utility_node'::geometry_kind, 'point'::geometry_kind])) AND og.valid_to IS NULL AND (geometrytype(og.geom) = ANY (ARRAY['POINT'::text, 'MULTIPOINT'::text]));
+
+-- === gis_raster_footprints ===
+ SELECT row_number() OVER (ORDER BY rl.captured_at, rl.created_at)::integer AS objectid,
+    rl.id,
+    rl.object_id,
+    o.code AS object_code,
+    rl.title,
+    rl.kind,
+    rl.storage_url,
+    rl.resolution_m,
+    rl.captured_at,
+    rl.z_min,
+    rl.z_max,
+    rl.z_unit,
+    rl.colormap,
+    st_multi(rl.bbox_wgs84)::geometry(MultiPolygon,4326) AS geom_4326,
+    st_multi(rl.bbox)::geometry(MultiPolygon,970634) AS geom_sk63
+   FROM raster_layers rl
+     LEFT JOIN objects o ON o.id = rl.object_id
+  WHERE rl.bbox IS NOT NULL;
+
+-- === gis_cadastrals ===
+ SELECT row_number() OVER (ORDER BY cadastral_number)::integer AS objectid,
+    id,
+    cadastral_number,
+    address,
+    category,
+    category_code,
+    vri,
+    ownership::text AS ownership,
+    ownership_raw,
+    source::text AS source,
+    is_seizure,
+    seizure_area_m2,
+    area_m2 AS area_declared_m2,
+    cadastral_cost,
+    status,
+    active,
+    geom AS geom_4326,
+    st_multi(st_transform(geom, 970634)) AS geom_sk63
+   FROM cadastrals
+  WHERE active = true AND geom IS NOT NULL;
+

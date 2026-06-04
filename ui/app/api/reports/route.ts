@@ -16,7 +16,9 @@ export async function GET(request: NextRequest) {
     .select('id, period_type, period_start, period_end, title, status, created_at, finalized_at')
     .order('period_start', { ascending: false })
 
-  if (periodType === 'week' || periodType === 'month') q = q.eq('period_type', periodType)
+  if (periodType === 'week' || periodType === 'month' || periodType === 'control') {
+    q = q.eq('period_type', periodType)
+  }
   if (status === 'draft' || status === 'final') q = q.eq('status', status)
 
   const { data, error } = await q
@@ -28,17 +30,30 @@ export async function GET(request: NextRequest) {
   if (ids.length > 0) {
     const sec = await supabaseAdmin
       .from('object_reports')
-      .select('report_id, project_movement, achievements, next_period_tasks, risks')
+      .select('report_id, project_movement, achievements, next_period_tasks, risks, narrative, contract_summary, decisions')
       .in('report_id', ids)
+    // Узнаём тип отчёта (week/month vs control) — счёт «filled» считаем по разным полям
+    const typeByReport = new Map<string, string>()
+    for (const r of (data ?? [])) typeByReport.set(r.id, r.period_type)
     for (const s of (sec.data ?? []) as Array<{
-      report_id: string; project_movement: string | null; achievements: string | null;
-      next_period_tasks: string | null; risks: string | null
+      report_id: string;
+      project_movement: string | null; achievements: string | null;
+      next_period_tasks: string | null; risks: string | null;
+      narrative: string | null; contract_summary: string | null; decisions: string | null;
     }>) {
       const c = countsByReport.get(s.report_id) ?? { total: 0, filled: 0 }
       c.total += 1
-      const filled = [s.project_movement, s.achievements, s.next_period_tasks, s.risks]
-        .filter((x) => x && x.trim().length > 0).length
-      if (filled === 4) c.filled += 1
+      const isControl = typeByReport.get(s.report_id) === 'control'
+      let filled: number
+      if (isControl) {
+        filled = [s.narrative, s.contract_summary, s.decisions]
+          .filter((x) => x && x.trim().length > 0).length
+        if (filled === 3) c.filled += 1
+      } else {
+        filled = [s.project_movement, s.achievements, s.next_period_tasks, s.risks]
+          .filter((x) => x && x.trim().length > 0).length
+        if (filled === 4) c.filled += 1
+      }
       countsByReport.set(s.report_id, c)
     }
   }
@@ -63,8 +78,8 @@ export async function POST(request: NextRequest) {
   }
 
   const periodType = body.period_type as PeriodType
-  if (periodType !== 'week' && periodType !== 'month') {
-    return NextResponse.json({ error: 'period_type должен быть week|month' }, { status: 400 })
+  if (periodType !== 'week' && periodType !== 'month' && periodType !== 'control') {
+    return NextResponse.json({ error: 'period_type должен быть week|month|control' }, { status: 400 })
   }
   if (!body.period_start) {
     return NextResponse.json({ error: 'period_start обязателен (YYYY-MM-DD)' }, { status: 400 })
@@ -94,7 +109,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: rErr?.message ?? 'unknown' }, { status: 500 })
   }
 
-  // Активные объекты, отсортированные по code (000_МАСТЕРПЛАН — первым)
+  // Активные объекты, отсортированные по code (001_МАСТЕРПЛАН — первым)
   const { data: objects, error: oErr } = await supabaseAdmin
     .from('objects')
     .select('id, code')

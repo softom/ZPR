@@ -25,3 +25,17 @@ business_data.yaml
 
 # Snippets — копии запросов из Supabase Studio, дублируют миграции
 supabase/snippets/
+
+# Telegram MTProto session — равноценна логину, никогда не в git
+# Любой *.session (включая .tg_session_send.session) = логин в аккаунт
+.tg_session
+*.session
+*.session-journal
+telegram_whitelist.yaml
+
+# Telegram app credentials (api_id) — реквизиты приложения, копия в Dropbox/_secrets
+docs/telegram_app_credentials.md
+
+# Дампы/бэкапы БД — бизнес-данные (ИНН, контакты) + раздувают репо. Не в git.
+_archive/*.sql
+_archive/backup_*.sql

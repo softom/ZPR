@@ -8,6 +8,8 @@ export type GanttBar = {
   layer: GanttLayer
   start: string  // YYYY-MM-DD
   end: string    // YYYY-MM-DD
+  /** Опционально — кастомный цвет бара/ромба, перебивает LAYER_COLOR[layer]. */
+  color?: string
 }
 
 export type GanttStage = {
@@ -20,6 +22,8 @@ export type GanttStage = {
   typeLabel?: string        // e.g. "💰 Аванс" — shown at bar end when showTypeLabels=true
   note?: string             // free-text remark shown in popup
   predecessorNames?: string[] // human-readable names of predecessor stages for popup
+  /** Опционально — короткая дата (DD.MM или DD.MM.YY) для колонки «Дата» слева. */
+  date?: string
 }
 
 type Props = {
@@ -30,6 +34,10 @@ type Props = {
   onBarChange?: (id: string, layer: GanttLayer, start: string, end: string) => void
   showTypeLabels?: boolean  // show type label at end of each bar (default false)
   className?: string
+  /** Высота строки в px. Default 56. Для компактного отображения — 24-28. */
+  rowHeight?: number
+  /** Ширина левой колонки «Этап/Задача» в px. Default 200. */
+  leftWidth?: number
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -72,8 +80,14 @@ export default function GanttChart({
   onBarChange,
   showTypeLabels = false,
   className = '',
+  rowHeight,
+  leftWidth,
 }: Props) {
   const tlRef = useRef<HTMLDivElement>(null)
+
+  // Эффективные размеры — можно перебить пропсами для компактного режима.
+  const rowH  = rowHeight ?? ROW_H
+  const leftW = leftWidth ?? LEFT_W
 
   const [drag, setDrag] = useState<{
     stageId: string
@@ -200,7 +214,7 @@ export default function GanttChart({
 
   const visibleLayers = (['plan', 'contract', 'actual'] as GanttLayer[]).filter(l => layers.includes(l))
   const barsH = visibleLayers.length * BAR_H + Math.max(0, visibleLayers.length - 1) * BAR_GAP
-  const barTop0 = (ROW_H - barsH) / 2
+  const barTop0 = (rowH - barsH) / 2
 
   // ─── Dependency arrows ───────────────────────────────────────────────────
 
@@ -214,11 +228,24 @@ export default function GanttChart({
   const stageRowMap = new Map(stages.map((s, i) => [s.id, i]))
   const arrowLines: ArrowLine[] = []
 
+  // Смещение от центра до верхней «вершины» формы:
+  // • ромб (length<=1 день) — повернутый на 45° квадрат, верхний угол на D*√½ выше центра
+  // • обычная полоса — верхний край BAR_H/2 выше центра
+  const DIAMOND_SIZE = 12  // px, синхронизировано с D в отрисовке точечного бара
+  function shapeTopOffset(bar: GanttBar): number {
+    const durationDays = Math.round(
+      (toDate(bar.end).getTime() - toDate(bar.start).getTime()) / 86400000
+    )
+    const isPoint = durationDays <= 1
+    return isPoint ? DIAMOND_SIZE * Math.SQRT1_2 : BAR_H / 2
+  }
+
   for (let ti = 0; ti < stages.length; ti++) {
     const tgt = stages[ti]
     if (!tgt.dependencies?.length) continue
     const tgtBar = tgt.bars.find(b => layers.includes(b.layer))
     if (!tgtBar) continue
+    const tgtTopY = ti * rowH + rowH / 2 - shapeTopOffset(tgtBar)
     for (const depId of tgt.dependencies) {
       const si = stageRowMap.get(depId)
       if (si === undefined) continue
@@ -229,9 +256,9 @@ export default function GanttChart({
       const { l: tl } = barPos(tgt, tgtBar)
       arrowLines.push({
         srcPct:  sl,
-        srcRowY: si * ROW_H + ROW_H / 2,
+        srcRowY: si * rowH + rowH / 2,
         tgtPct:  tl,
-        tgtRowY: ti * ROW_H + ROW_H / 2,
+        tgtRowY: tgtTopY,  // стрелка приходит в верхнюю точку ромба/бара, не в центр
       })
     }
   }
@@ -271,9 +298,12 @@ export default function GanttChart({
           {/* Header row */}
           <div className="flex border-b border-gray-200 bg-gray-50">
             <div
-              className="shrink-0 border-r border-gray-200 px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase tracking-wider flex items-center"
-              style={{ width: LEFT_W }}>
-              Этап / Задача
+              className="shrink-0 border-r border-gray-200 px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2"
+              style={{ width: leftW }}>
+              <span className="flex-1">Этап / Задача</span>
+              {stages.some(s => s.date) && (
+                <span className="text-gray-400 shrink-0">Дата</span>
+              )}
             </div>
             <div ref={tlRef} className="flex-1 relative" style={{ height: 36 }}>
               {months.map((m, i) => (
@@ -294,12 +324,12 @@ export default function GanttChart({
             return (
               <div key={stage.id}
                 className={`flex border-b border-gray-100 last:border-b-0 ${si % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}
-                style={{ height: ROW_H }}>
+                style={{ height: rowH }}>
 
-                {/* Name column */}
+                {/* Name + Date columns */}
                 <div
                   className="shrink-0 border-r border-gray-200 px-3 flex items-center gap-2 overflow-hidden"
-                  style={{ width: LEFT_W }}>
+                  style={{ width: leftW }}>
                   <span className="text-[11px] font-mono text-gray-400 shrink-0">{stage.number}</span>
                   <span className="text-[11px] text-gray-700 truncate flex-1">{stage.name}</span>
                   {!!stage.issues && (
@@ -307,10 +337,15 @@ export default function GanttChart({
                       ·{stage.issues}
                     </span>
                   )}
+                  {stage.date && (
+                    <span className="shrink-0 text-[10px] font-mono text-gray-500 tabular-nums whitespace-nowrap">
+                      {stage.date}
+                    </span>
+                  )}
                 </div>
 
                 {/* Timeline column */}
-                <div className="flex-1 relative overflow-hidden" style={{ height: ROW_H }}>
+                <div className="flex-1 relative overflow-hidden" style={{ height: rowH }}>
 
                   {/* Month grid lines */}
                   {months.map((m, i) => (
@@ -352,7 +387,7 @@ export default function GanttChart({
                         >
                           <div
                             className={`absolute transition-none ${canDrag ? 'cursor-ew-resize' : ''} ${isDragging ? 'opacity-60' : ''}`}
-                            style={{ width: D, height: D, transform: 'translateX(-50%) rotate(45deg)', background: LAYER_COLOR[bar.layer] }}
+                            style={{ width: D, height: D, transform: 'translateX(-50%) rotate(45deg)', background: bar.color ?? LAYER_COLOR[bar.layer] }}
                             onMouseDown={e => handleMouseDown(e, stage.id, bar.layer, bar)}
                           />
                           {showTypeLabels && stage.typeLabel && (
@@ -373,7 +408,7 @@ export default function GanttChart({
                       >
                         <div
                           className={`absolute inset-0 rounded-sm transition-none ${canDrag ? 'cursor-ew-resize hover:brightness-90' : ''} ${isDragging ? 'opacity-70' : ''}`}
-                          style={{ background: LAYER_COLOR[bar.layer] }}
+                          style={{ background: bar.color ?? LAYER_COLOR[bar.layer] }}
                           onMouseDown={e => handleMouseDown(e, stage.id, bar.layer, bar)}
                         />
                         {showTypeLabels && stage.typeLabel && (
@@ -393,7 +428,7 @@ export default function GanttChart({
           {/* Dependency arrow overlay (over timeline column only) */}
           {arrowLines.length > 0 && (
             <div className="absolute inset-y-0 pointer-events-none z-20 overflow-hidden"
-              style={{ left: LEFT_W, right: 0 }}>
+              style={{ left: leftW, right: 0 }}>
               {arrowLines.map((a, i) => {
                 const clr = '#94a3b8'  // slate-400
                 const minY = Math.min(a.srcRowY, a.tgtRowY)

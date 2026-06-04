@@ -1,7 +1,7 @@
 -- ============================================================
 -- object_reports.object_id — переход на UUID FK
 -- ============================================================
--- См. [[20_Правило_связей]]: связи между сущностями — через UUID.
+-- См. [[09_Правило_связей]]: связи между сущностями — через UUID.
 -- Удаляем object_code (text), вводим object_id (uuid FK на objects.id).
 
 alter table object_reports add column object_id uuid references objects(id);

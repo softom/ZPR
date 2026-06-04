@@ -26,6 +26,7 @@ import {
   extractTasksAndTopics,
   type MeetingContext,
 } from '@/lib/protocol/extractTasksAndTopics'
+import { ensureMeetingCode } from '@/lib/protocol/meetingCode'
 
 const STORAGE_DIR = (process.env.STORAGE_DIR ?? 'D:\\ЗПР_Хранилище').replace(/\//g, path.sep)
 
@@ -69,7 +70,7 @@ export async function POST(
         const [orgsRes, partsRes, objectsRes] = await Promise.all([
           supabaseAdmin
             .from('meeting_legal_entities')
-            .select('legal_entity_id, legal_entities(id,name,aliases)')
+            .select('legal_entity_id, role, legal_entities(id,name,aliases)')
             .eq('meeting_id', id),
           supabaseAdmin
             .from('meeting_participants')
@@ -81,19 +82,21 @@ export async function POST(
         ])
 
         type LERef = { id: string; name: string; aliases: unknown }
-        type OrgRow = { legal_entity_id: string; legal_entities: LERef | LERef[] | null }
+        type OrgRow = { legal_entity_id: string; role: string | null; legal_entities: LERef | LERef[] | null }
+        type LEItem = { id: string; name: string; aliases: string[]; role?: string }
         const legalEntities = ((orgsRes.data ?? []) as OrgRow[])
-          .map((r) => {
+          .map((r): LEItem | null => {
             const le = Array.isArray(r.legal_entities) ? r.legal_entities[0] : r.legal_entities
-            return le
-              ? {
-                  id: le.id,
-                  name: le.name,
-                  aliases: Array.isArray(le.aliases) ? (le.aliases as string[]) : [],
-                }
-              : null
+            if (!le) return null
+            const item: LEItem = {
+              id: le.id,
+              name: le.name,
+              aliases: Array.isArray(le.aliases) ? (le.aliases as string[]) : [],
+            }
+            if (r.role) item.role = r.role
+            return item
           })
-          .filter((x): x is { id: string; name: string; aliases: string[] } => Boolean(x))
+          .filter((x): x is LEItem => Boolean(x))
 
         type ContactRef = {
           last_name?: string | null
@@ -183,6 +186,29 @@ export async function POST(
           message: `LLM вернула: ${result.tasks.length} задач, ${result.topics.length} тем`,
         })
 
+        // Детектор invalid-UTF-8 в LLM-выводе. Claude через Polza.AI изредка
+        // выдаёт U+FFFD (replacement char) — обычно один-два байта Cyrillic-символа
+        // ломаются на токенной границе. Не критично, но видно глазом в UI («��»).
+        // Подсчитываем количество поражённых записей и логируем — пользователь
+        // увидит предупреждение и сможет поправить через «✎ Изменить» в Секции 6.
+        const FFFD = '�'
+        const tasksWithBadChars = result.tasks.filter(
+          (t) => (t.title?.includes(FFFD)) || (t.explanation?.includes(FFFD)),
+        )
+        const topicsWithBadChars = result.topics.filter(
+          (t) => (t.title?.includes(FFFD)) || (t.content?.includes(FFFD)),
+        )
+        if (tasksWithBadChars.length + topicsWithBadChars.length > 0) {
+          send({
+            type: 'log',
+            status: 'fail',
+            message:
+              `⚠ В ${tasksWithBadChars.length} задачах и ${topicsWithBadChars.length} темах ` +
+              `обнаружены invalid-UTF-8 символы (�) — Claude изредка ломает Cyrillic на токенной границе. ` +
+              `Поправьте вручную в Секции 6 («✎ Изменить»).`,
+          })
+        }
+
         // ── Сохранение в БД ───────────────────────────────────────────
         send({ type: 'log', status: 'start', message: 'Сохранение в БД…' })
 
@@ -194,9 +220,12 @@ export async function POST(
           .eq('meeting_id', id)
           .eq('status', 'preliminary')
 
-        const contractorCode = (meeting.contractor_code as string | null) || 'ОБЩ'
-        const dateIso = meeting.meeting_date as string
-        const sourceProto = `ПРОТ-${dateIso}-${contractorCode}`
+        // Генерируем (или читаем) уникальный meeting.code. Сохраняется в БД
+        // при первом вызове и фиксируется — повторные обработки не меняют его.
+        // При коллизии (несколько собраний в один день у одного подрядчика)
+        // второй и далее получают суффикс -2, -3, ... См. lib/protocol/meetingCode.ts.
+        const sourceProto = await ensureMeetingCode(id)
+        send({ type: 'log', status: 'ok', message: `Код протокола: ${sourceProto}` })
 
         async function resolveOrgId(name: string | null | undefined): Promise<string | null> {
           if (!name) return null
@@ -208,7 +237,7 @@ export async function POST(
         }
 
         // Map: object code/alias → uuid. LLM возвращает коды (`02_FAM_800`),
-        // но в БД мы храним связь по uuid (см. WIKI 20_Правило_связей).
+        // но в БД мы храним связь по uuid (см. WIKI 09_Правило_связей).
         const codeToObjectId = new Map<string, string>()
         for (const o of objects as Array<{ id?: string; code: string; current_name: string }>) {
           if (o.code && (o as { id?: string }).id) {
@@ -229,20 +258,75 @@ export async function POST(
           const aliasArr = Array.isArray(o.aliases) ? (o.aliases as string[]) : []
           for (const a of aliasArr) codeToObjectId.set(a, o.id)
         }
+        // Объекты, реально входящие в это собрание — для жёсткой валидации.
+        // LLM иногда «галлюцинирует» и возвращает объект, не присутствующий
+        // в meeting.object_ids (например похожее название другого отеля). Без
+        // фильтра резолвер находит такой объект в общем списке active=true и
+        // тихо привязывает задачу не к тому отелю. Защищаемся:
+        //   • Оставляем только объекты ⊆ meeting.object_ids
+        //   • Если ничего не осталось — задача относится ко ВСЕМУ собранию
+        //     (object_ids = meeting.object_ids), это безопасный fallback.
+        const meetingObjectIds = Array.isArray(meeting.object_ids)
+          ? (meeting.object_ids as string[])
+          : []
+        const meetingObjectIdSet = new Set(meetingObjectIds)
+
         function resolveObjectIds(codes: string[] | undefined | null): string[] {
-          if (!codes) return []
           const ids = new Set<string>()
-          for (const c of codes) {
+          for (const c of codes ?? []) {
             const id = codeToObjectId.get(c)
-            if (id) ids.add(id)
+            if (id && meetingObjectIdSet.has(id)) ids.add(id)
+          }
+          if (ids.size === 0 && meetingObjectIds.length > 0) {
+            // LLM не указала объект (или указала не из собрания) — относим ко всем
+            return [...meetingObjectIds]
           }
           return [...ids]
+        }
+
+        // Подсчёт уже занятых seq для этого префикса. Защита на случай если
+        // несколько собраний на одну дату попадают под один sourceProto
+        // (например, fallback на meeting_id slice совпал, либо разные собрания
+        // с одним подрядчиком на одну дату). Без этого INSERT падает в
+        // UNIQUE-конфликт по `code` и тихо пропускает часть задач/тем.
+        const taskPrefix = `${sourceProto}-ЗАД-`
+        const topicPrefix = `${sourceProto}-ОБС-`
+        const [{ data: existingTaskCodes }, { data: existingTopicCodes }] = await Promise.all([
+          supabaseAdmin.from('tasks').select('code').like('code', `${taskPrefix}%`),
+          supabaseAdmin.from('meeting_topics').select('code').like('code', `${topicPrefix}%`),
+        ])
+        const usedTaskSeqs = new Set<number>(
+          ((existingTaskCodes ?? []) as Array<{ code: string }>)
+            .map((r) => Number(r.code.slice(taskPrefix.length)))
+            .filter((n) => Number.isFinite(n)),
+        )
+        const usedTopicSeqs = new Set<number>(
+          ((existingTopicCodes ?? []) as Array<{ code: string }>)
+            .map((r) => Number(r.code.slice(topicPrefix.length)))
+            .filter((n) => Number.isFinite(n)),
+        )
+        let nextTaskSeq = 1
+        function takeNextTaskSeq(): number {
+          while (usedTaskSeqs.has(nextTaskSeq)) nextTaskSeq++
+          const v = nextTaskSeq
+          usedTaskSeqs.add(v)
+          nextTaskSeq++
+          return v
+        }
+        let nextTopicSeq = 1
+        function takeNextTopicSeq(): number {
+          while (usedTopicSeqs.has(nextTopicSeq)) nextTopicSeq++
+          const v = nextTopicSeq
+          usedTopicSeqs.add(v)
+          nextTopicSeq++
+          return v
         }
 
         let tasksInserted = 0
         for (let i = 0; i < result.tasks.length; i++) {
           const t = result.tasks[i]
-          const code = `${sourceProto}-ЗАД-${String(i + 1).padStart(2, '0')}`
+          const seq = takeNextTaskSeq()
+          const code = `${taskPrefix}${String(seq).padStart(2, '0')}`
           const assignee_entity_id = await resolveOrgId(t.assignee_org)
           const object_ids = resolveObjectIds(t.object_codes)
           const { error } = await supabaseAdmin.from('tasks').insert({
@@ -253,13 +337,11 @@ export async function POST(
             priority: t.priority || 'medium',
             assignee_org: t.assignee_org,
             assignee_entity_id,
-            object_codes: t.object_codes ?? [],   // legacy text для переходного периода
-            object_ids,                            // источник истины — UUID
+            object_ids,                            // UUID — единственный источник истины
             due_date: t.due_date,
             quotes: t.quotes ?? [],
-            source_protocol: sourceProto,
-            source_meeting_date: dateIso,
-            source_meeting_path: meeting.folder_path ?? null,
+            // Источник: meeting_id, entity_links(raised_from) создастся триггером.
+            // См. WIKI 19_Сущность_Задача «v2.4».
             meeting_id: id,
             tags: ['protocol'],
           })
@@ -270,19 +352,19 @@ export async function POST(
         let topicsInserted = 0
         for (let i = 0; i < result.topics.length; i++) {
           const t = result.topics[i]
-          const code = `${sourceProto}-ОБС-${String(i + 1).padStart(2, '0')}`
+          const seq = takeNextTopicSeq()
+          const code = `${topicPrefix}${String(seq).padStart(2, '0')}`
           const raised_by_entity_id = await resolveOrgId(t.raised_by_org)
           const object_ids = resolveObjectIds(t.object_codes)
           const { error } = await supabaseAdmin.from('meeting_topics').insert({
             meeting_id: id,
             code,
-            seq: i + 1,
+            seq,
             title: t.title,
             content: t.content || '',
             raised_by_org: t.raised_by_org,
             raised_by_entity_id,
-            object_codes: t.object_codes ?? [],   // legacy text
-            object_ids,                            // UUID — источник истины
+            object_ids,                            // UUID — единственный источник истины
             quotes: t.quotes ?? [],
             status: 'preliminary',
             discussion_date: meeting.meeting_date, // по умолчанию = дата собрания, может быть сдвинута при ревью

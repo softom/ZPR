@@ -40,7 +40,7 @@ type ProjectStage = {
 const NO_STAGE_KEY = '__none__'
 const NO_STAGE_LABEL = 'Без стадии'
 
-/** Из кода `006_ГОСТИНИЦА_350` достаём 6 (число для сортировки). Если не извлекается — Number.MAX_SAFE_INTEGER (в конец). */
+/** Из кода `106_ГОСТИНИЦА_350` достаём 106 (число для сортировки). Если не извлекается — Number.MAX_SAFE_INTEGER (в конец). */
 function objectNumber(code: string): number {
   const m = code.match(/^(\d+)/)
   return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER
@@ -130,14 +130,23 @@ export default function ContractsPage() {
     <div className="max-w-6xl">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold text-gray-900">Договоры</h1>
-        {isAdmin && (
+        <div className="flex gap-2">
           <button
-            onClick={() => router.push('/contracts/new')}
-            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
+            onClick={() => router.push('/contracts/print')}
+            className="px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
+            title="Сводная таблица по всем договорам: этапы, события, даты"
           >
-            + Договор
+            🖨 Сводка
           </button>
-        )}
+          {isAdmin && (
+            <button
+              onClick={() => router.push('/contracts/new')}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
+            >
+              + Договор
+            </button>
+          )}
+        </div>
       </div>
 
       {loading ? (

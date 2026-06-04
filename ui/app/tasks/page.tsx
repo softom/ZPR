@@ -2,7 +2,12 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
+import { optionIconPrefix } from '@/lib/objects/iconLabel'
+import { formatMeetingRef, type ContactMin } from '@/lib/entityRef'
+import { EntityLinksBlock, type LinkPhase } from '@/components/EntityLinksBlock'
+import { EntityLinkPicker } from '@/components/EntityLinkPicker'
 
 type Task = {
   id: string
@@ -13,27 +18,81 @@ type Task = {
   priority: 'high' | 'medium' | 'low' | null
   assignee_org: string | null
   assignee_entity_id: string | null
-  object_ids: string[]               // UUID — основная связь (см. WIKI 20_Правило_связей)
+  object_ids: string[]               // UUID — основная связь (см. WIKI 09_Правило_связей)
+  meeting_id: string | null          // FK на meetings — собрание-источник (denormalized, sync с entity_links.raised_from)
+  start_date: string | null
   due_date: string | null
   done_date: string | null
   done_note: string | null
-  source_protocol: string | null
-  source_meeting_date: string | null
-  source_meeting_path: string | null
   quotes: { speaker_org?: string; text: string }[]
+  // Ранжирование задачи для попадания в отчёт (см. WIKI 19 → «Ранжирование»).
+  // critical/high/normal/low/skip или null (не оценена).
+  report_relevance: 'critical' | 'high' | 'normal' | 'low' | 'skip' | null
   created_at: string
   updated_at: string
 }
 
+// Иконки и подписи для уровней report_relevance (по образцу events.importance).
+const REPORT_RELEVANCE: Record<NonNullable<Task['report_relevance']>, { icon: string; label: string; color: string; sort: number }> = {
+  critical: { icon: '🔥', label: 'Критично',   color: 'text-red-700 bg-red-50',        sort: 0 },
+  high:     { icon: '⭐', label: 'Важно',      color: 'text-amber-700 bg-amber-50',    sort: 1 },
+  normal:   { icon: '•',  label: 'Обычно',    color: 'text-gray-600 bg-gray-50',      sort: 2 },
+  low:      { icon: '○',  label: 'Низкое',    color: 'text-gray-400 bg-gray-50',      sort: 3 },
+  skip:     { icon: '🚫', label: 'Не в отчёт', color: 'text-gray-400 bg-gray-100',    sort: 4 },
+}
+
+type MeetingRef = { id: string; code: string | null; title: string | null; meeting_date: string; object_ids: string[] | null }
+
 type LegalEntity = { id: string; name: string }
-type ObjectRef = { id: string; code: string; current_name: string }
+type ObjectRef = { id: string; code: string; current_name: string; color: string | null; icon: string | null; icon_small: string | null }
 
 type ObjectStatusRow = {
   task_id: string
   object_id: string
   status: 'open' | 'in_progress' | 'done' | 'closed' | 'cancelled'
   done_date: string | null
+  resolved_via_link_id: string | null
 }
+
+// Связь задачи с внешней сущностью — фаза жизненного цикла из entity_links.
+// См. WIKI 19_Сущность_Задача «Жизненный цикл связей задачи».
+type TaskLink = {
+  id: string
+  from_id: string                                       // task.id (as text)
+  to_type: 'meeting' | 'event' | 'document' | 'letter' | 'legal_entity' | 'contact'
+  to_id: string
+  link_type: 'raised_from' | 'related_to' | 'resolved_by' | 'assigned_to'
+  notes: string | null
+  created_at: string
+}
+
+// Фазы жизненного цикла задачи — конфиг для общего EntityLinksBlock.
+// Каждая фаза = один link_type. См. WIKI 19 «Жизненный цикл связей задачи».
+const TASK_LINK_PHASES: LinkPhase[] = [
+  { linkType: 'raised_from', icon: '📌', label: 'Постановка',         color: 'border-blue-400 bg-blue-50',   addHint: 'Добавить связь фазы «Постановка»' },
+  { linkType: 'related_to',  icon: '🔄', label: 'Связанные действия', color: 'border-amber-400 bg-amber-50', addHint: 'Добавить связь фазы «Связанные действия»' },
+  { linkType: 'resolved_by', icon: '✅', label: 'Завершение',         color: 'border-green-400 bg-green-50', addHint: 'Добавить связь фазы «Завершение» (закроет per-object статусы)' },
+]
+
+// Отдельная фаза «Ответственные» — link_type='assigned_to', to_type
+// может быть legal_entity (организация) или contact (конкретное лицо).
+// Денормализация: первый assigned_to→legal_entity отзеркаливается в
+// tasks.assignee_entity_id триггером (см. WIKI 19 v2.5).
+const TASK_ASSIGNEE_PHASES: LinkPhase[] = [
+  { linkType: 'assigned_to', icon: '👤', label: 'Ответственные', color: 'border-purple-400 bg-purple-50', addHint: 'Добавить ответственного (контакт или организация)' },
+]
+
+function taskPhaseLabel(linkType: TaskLink['link_type']): string {
+  return TASK_LINK_PHASES.find((p) => p.linkType === linkType)?.label ?? linkType
+}
+
+type EventRef = { id: string; title: string; event_type: string; date_end: string | null; date_computed: string | null; object_ids: string[] | null }
+// Связь «событие → задача» (entity_links references). Используется для
+// детектора «висящих» задач: если есть свежий event-reference с датой > due_date,
+// задача вероятно фактически выполнена.
+type EventTaskRef = { from_id: string; to_id: string; created_at: string }
+type DocumentRef = { id: string; title: string; doc_number: string | null; signed_date: string | null }
+type LetterRef = { id: string; subject: string; date: string | null; direction: string | null }
 
 const STATUS_OPTIONS: Task['status'][] = [
   'preliminary',
@@ -91,9 +150,23 @@ export default function TasksPage() {
   const [objectStatus, setObjectStatus] = useState<ObjectStatusRow[]>([])
   const [entities, setEntities] = useState<LegalEntity[]>([])
   const [objects, setObjects] = useState<ObjectRef[]>([])
+  const [meetings, setMeetings] = useState<MeetingRef[]>([])
+  const [taskLinks, setTaskLinks] = useState<TaskLink[]>([])
+  const [eventsRef, setEventsRef] = useState<EventRef[]>([])
+  const [documentsRef, setDocumentsRef] = useState<DocumentRef[]>([])
+  const [lettersRef, setLettersRef] = useState<LetterRef[]>([])
+  const [contactsRef, setContactsRef] = useState<ContactMin[]>([])
+  const [eventTaskRefs, setEventTaskRefs] = useState<EventTaskRef[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [opened, setOpened] = useState<Task | null>(null)
+  // «Отчитаться» — модалка для закрытия задачи на конкретном объекте через
+  // создание event(project_note) + entity_links(resolved_by) + UPDATE
+  // task_object_status.
+  const [reportTarget, setReportTarget] = useState<{ task: Task; objectId: string } | null>(null)
+  // «+ Добавить связь» — модалка для ручного добавления entity_link
+  // указанной фазы (raised_from / related_to / resolved_by).
+  const [addLinkTarget, setAddLinkTarget] = useState<{ task: Task; linkType: TaskLink['link_type'] } | null>(null)
 
   // Фильтры
   const [filterStatus, setFilterStatus] = useState<string>('active') // active | preliminary | done | all | <status>
@@ -101,27 +174,81 @@ export default function TasksPage() {
   const [filterObject, setFilterObject] = useState<string>('')
   const [filterPriority, setFilterPriority] = useState<string>('')
   const [filterOverdue, setFilterOverdue] = useState<boolean>(false)
+  // «Висящие» — задачи open/in_progress, на которых есть свежие event-references
+  // с датой > due_date. Сильный сигнал «фактически закрыта, но статус не обновлён».
+  const [filterStale, setFilterStale] = useState<boolean>(false)
+  // Релевантность для отчёта — фильтр по уровню (или 'unrated' = без оценки)
+  const [filterRelevance, setFilterRelevance] = useState<string>('')
+  // Сортировка по релевантности для пред-отчёта (critical → high → normal → low → skip → unrated)
+  const [sortByRelevance, setSortByRelevance] = useState<boolean>(false)
   const [search, setSearch] = useState('')
-  const [groupBy, setGroupBy] = useState<'none' | 'entity' | 'object'>('object')
+  const [groupBy, setGroupBy] = useState<'none' | 'entity' | 'object'>('none')
+  // Режим отображения для groupBy='object':
+  //   'by-link' — задача дублируется в каждой группе своих object_ids (по связям)
+  //   'by-task' — задача показывается один раз, в группе первого object_id (по задачам)
+  const [objectViewMode, setObjectViewMode] = useState<'by-link' | 'by-task'>('by-link')
 
   useEffect(() => {
     load()
   }, [])
 
+  // Открытие задачи по ?open=<id> в URL — используется ссылками из других страниц
+  // (например, из карточек событий /reports/[id] → клик на raised_from-задачу).
+  const searchParams = useSearchParams()
+  useEffect(() => {
+    const openId = searchParams?.get('open')
+    if (!openId || tasks.length === 0) return
+    const t = tasks.find((x) => x.id === openId)
+    if (t) setOpened(t)
+  }, [searchParams, tasks])
+
   async function load() {
     setLoading(true)
     setError('')
-    const [t, tos, e, o] = await Promise.all([
+    const [t, tos, e, o, m, links, evs, docs, lts, ct, refs] = await Promise.all([
       supabase.from('tasks').select('*').order('priority').order('due_date', { nullsFirst: false }),
-      supabase.from('task_object_status').select('task_id, object_id, status, done_date'),
+      supabase.from('task_object_status').select('task_id, object_id, status, done_date, resolved_via_link_id'),
       supabase.from('legal_entities').select('id, name').order('name'),
-      supabase.from('objects').select('id, code, current_name').order('code'),
+      supabase.from('objects').select('id, code, current_name, color, icon, icon_small').order('code'),
+      supabase.from('meetings').select('id, code, title, meeting_date, object_ids'),
+      // Связи задач — все четыре фазы (lifecycle + assigned_to).
+      // См. WIKI 19_Сущность_Задача «Жизненный цикл связей задачи» и «v2.5 — Ответственные».
+      supabase.from('entity_links')
+        .select('id, from_id, to_type, to_id, link_type, notes, created_at')
+        .eq('from_type', 'task')
+        .in('link_type', ['raised_from', 'related_to', 'resolved_by', 'assigned_to']),
+      supabase.from('events').select('id, title, event_type, date_end, date_computed, object_ids'),
+      supabase.from('documents').select('id, title, doc_number, signed_date'),
+      supabase.from('letters').select('id, subject, date, direction'),
+      supabase.from('contacts')
+        .select('id, last_name, first_name, middle_name, job_title, legal_entity_id, user_id')
+        .eq('is_active', true)
+        .order('last_name'),
+      // Связи событие → задача (references) — для эвристики «висящие» задачи:
+      // если есть свежее событие, ссылающееся на задачу, она вероятно фактически
+      // выполнена, но в БД status всё ещё open.
+      supabase.from('entity_links')
+        .select('from_id, to_id, created_at')
+        .eq('from_type', 'event')
+        .eq('to_type', 'task')
+        .eq('link_type', 'references'),
     ])
     if (t.error) setError(t.error.message)
-    setTasks((t.data as Task[]) || [])
+    const newTasks = (t.data as Task[]) || []
+    setTasks(newTasks)
+    // Синхронизируем opened с обновлёнными данными, чтобы статус/даты
+    // в модалке отражали реальное состояние БД после любого save/upsert.
+    setOpened((prev) => prev ? (newTasks.find((x) => x.id === prev.id) ?? prev) : null)
     setObjectStatus((tos.data as ObjectStatusRow[]) || [])
     setEntities((e.data as LegalEntity[]) || [])
     setObjects((o.data as ObjectRef[]) || [])
+    setMeetings((m.data as MeetingRef[]) || [])
+    setTaskLinks((links.data as TaskLink[]) || [])
+    setEventsRef((evs.data as EventRef[]) || [])
+    setDocumentsRef((docs.data as DocumentRef[]) || [])
+    setLettersRef((lts.data as LetterRef[]) || [])
+    setContactsRef((ct.data as ContactMin[]) || [])
+    setEventTaskRefs((refs.data as EventTaskRef[]) || [])
     setLoading(false)
   }
 
@@ -131,6 +258,42 @@ export default function TasksPage() {
     for (const r of objectStatus) m.set(`${r.task_id}|${r.object_id}`, r)
     return m
   }, [objectStatus])
+
+  // Карта task_id → { latestEventDate, latestEvent } по references event→task.
+  // Используется детектором «висящих» (filterStale): если событие свежее due_date,
+  // задача вероятно фактически выполнена.
+  type StaleInfo = { latestEventDate: string; latestEvent: EventRef }
+  const staleByTaskId = useMemo(() => {
+    const eventById = new Map(eventsRef.map((e) => [e.id, e]))
+    const result = new Map<string, StaleInfo>()
+    for (const r of eventTaskRefs) {
+      const ev = eventById.get(r.from_id)
+      if (!ev) continue
+      const d = ev.date_computed ?? ev.date_end
+      if (!d) continue
+      const prev = result.get(r.to_id)
+      if (!prev || d > prev.latestEventDate) {
+        result.set(r.to_id, { latestEventDate: d, latestEvent: ev })
+      }
+    }
+    return result
+  }, [eventTaskRefs, eventsRef])
+
+  // Задача «висящая»: open/in_progress + есть event-reference с date > due_date.
+  // Если due_date нет — fallback: ref date > today - 14 дней.
+  function isStaleTask(t: Task): boolean {
+    if (!['open', 'in_progress'].includes(t.status)) return false
+    const info = staleByTaskId.get(t.id)
+    if (!info) return false
+    if (t.due_date) {
+      return info.latestEventDate > t.due_date
+    }
+    // due нет — считаем висящей если event-ref свежее 14 дней
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - 14)
+    const cutoffISO = cutoff.toISOString().slice(0, 10)
+    return info.latestEventDate >= cutoffISO
+  }
 
   // Per-object статус задачи в контексте конкретного объекта.
   // Для preliminary и legacy без объекта — fallback на агрегатный tasks.status.
@@ -149,7 +312,7 @@ export default function TasksPage() {
   }
 
   // Правка дат прямо в задаче (срок / выполнено) для legacy-задач без объектов
-  async function saveTaskDate(task: Task, field: 'due_date' | 'done_date', value: string) {
+  async function saveTaskDate(task: Task, field: 'start_date' | 'due_date' | 'done_date', value: string) {
     const newVal = value || null
     if ((task[field] ?? null) === newVal) return
     const { error } = await supabase.from('tasks').update({ [field]: newVal }).eq('id', task.id)
@@ -165,6 +328,175 @@ export default function TasksPage() {
       .from('task_object_status')
       .update({ done_date: newVal })
       .match({ task_id: taskId, object_id: objectId })
+    if (error) { alert(error.message); return }
+    await load()
+  }
+
+  // «Отчитаться» — атомарное создание отчёта о выполнении задачи на объекте.
+  // Создаёт:
+  //   1) event(project_note) с датой/заметкой/object_ids=[objectId]
+  //   2) entity_link (from=task, to=event, link_type='resolved_by') — фаза завершения
+  //   3) UPDATE task_object_status: status='done', done_date, done_note,
+  //      done_by_entity_id, resolved_via_link_id=link.id
+  // См. WIKI 19_Сущность_Задача «Жизненный цикл связей задачи» + кнопка
+  // «✓ Отчитаться» в ObjectStatusEditor.
+  async function submitCompletionReport(args: {
+    task: Task
+    objectId: string
+    date: string
+    note: string
+    doneByEntityId: string | null
+  }): Promise<string | null> {
+    const { task, objectId, date, note, doneByEntityId } = args
+
+    // 1) event
+    const obj = objects.find((o) => o.id === objectId)
+    const objLabel = obj ? `${obj.code} — ${obj.current_name}` : objectId.slice(0, 8)
+    const eventTitle = `Выполнено: ${task.code} (${objLabel})`
+    const evRes = await supabase.from('events').insert({
+      event_type: 'project_note',
+      title: eventTitle,
+      date_end: date,
+      object_ids: [objectId],
+      note: note || null,
+    }).select('id').single()
+    if (evRes.error || !evRes.data) {
+      return evRes.error?.message ?? 'Не удалось создать событие'
+    }
+    const eventId = evRes.data.id as string
+
+    // 2) entity_link (resolved_by)
+    const linkRes = await supabase.from('entity_links').insert({
+      from_type: 'task',
+      from_id:   task.id,
+      to_type:   'event',
+      to_id:     eventId,
+      link_type: 'resolved_by',
+      notes:     note || null,
+    }).select('id').single()
+    if (linkRes.error || !linkRes.data) {
+      return linkRes.error?.message ?? 'Не удалось создать связь resolved_by'
+    }
+    const linkId = linkRes.data.id as string
+
+    // 3) update task_object_status
+    const updRes = await supabase.from('task_object_status').upsert({
+      task_id: task.id,
+      object_id: objectId,
+      status: 'done',
+      done_date: date,
+      done_note: note || null,
+      done_by_entity_id: doneByEntityId,
+      resolved_via_link_id: linkId,
+    }, { onConflict: 'task_id,object_id' })
+    if (updRes.error) {
+      return updRes.error.message
+    }
+
+    await load()
+    return null
+  }
+
+  // Ручное добавление связи задачи с внешней сущностью.
+  //
+  // Каскад при link_type='resolved_by': задача автоматически закрывается на
+  // per-object строках где она ещё активна (open/in_progress). Объекты для
+  // закрытия = intersection(task.object_ids, target.object_ids) если у цели
+  // есть object_ids (meeting/event), иначе все task.object_ids (document/letter).
+  // Финальные статусы (cancelled/done/closed) НЕ переписываются — соблюдаем
+  // правило сохранения per-object истории, см. WIKI 19 раздел «Правило
+  // агрегатного статуса».
+  //
+  // Триггер entity_links_sync_meeting_id автоматом обновит tasks.meeting_id
+  // если link_type='raised_from' и to_type='meeting'. См. WIKI 19 v2.4.
+  async function addTaskLink(args: {
+    task: Task
+    linkType: TaskLink['link_type']
+    toType: TaskLink['to_type']
+    toId: string
+    notes: string | null
+  }): Promise<string | null> {
+    const { task, linkType, toType, toId, notes } = args
+    const insRes = await supabase.from('entity_links').insert({
+      from_type: 'task',
+      from_id:   task.id,
+      to_type:   toType,
+      to_id:     toId,
+      link_type: linkType,
+      notes:     notes || null,
+    }).select('id').single()
+    if (insRes.error || !insRes.data) return insRes.error?.message ?? 'Не удалось создать связь'
+    const linkId = insRes.data.id as string
+
+    // Каскад resolved_by → закрытие per-object статусов
+    if (linkType === 'resolved_by') {
+      // Дата закрытия и object_ids цели — из соответствующего реестра
+      const today = new Date().toISOString().slice(0, 10)
+      let resolveDate = today
+      let targetObjectIds: string[] | null = null
+      if (toType === 'meeting') {
+        const m = meetings.find((x) => x.id === toId)
+        resolveDate = m?.meeting_date ?? today
+        targetObjectIds = m?.object_ids ?? null
+      } else if (toType === 'event') {
+        const e = eventsRef.find((x) => x.id === toId)
+        resolveDate = e?.date_end ?? e?.date_computed ?? today
+        targetObjectIds = e?.object_ids ?? null
+      } else if (toType === 'document') {
+        const d = documentsRef.find((x) => x.id === toId)
+        resolveDate = d?.signed_date ?? today
+        // У документа object_ids в этом запросе не подтянут — каскад на все task.object_ids
+        targetObjectIds = null
+      } else if (toType === 'letter') {
+        const l = lettersRef.find((x) => x.id === toId)
+        resolveDate = l?.date ?? today
+        targetObjectIds = null
+      }
+
+      // Объекты задачи, которые надо закрыть: intersection если есть object_ids у цели,
+      // иначе ВСЕ объекты задачи. Финально пустой массив — нечего делать.
+      const taskObjects = task.object_ids ?? []
+      const targets = targetObjectIds && targetObjectIds.length > 0
+        ? taskObjects.filter((oid) => targetObjectIds!.includes(oid))
+        : taskObjects
+      if (targets.length === 0) {
+        await load()
+        return null
+      }
+
+      // Меняем статус только на open/in_progress строках — не трогаем cancelled/done/closed
+      // (UPDATE с WHERE — нет риска перезаписать финальные статусы).
+      const updRes = await supabase
+        .from('task_object_status')
+        .update({
+          status: 'done',
+          done_date: resolveDate,
+          done_note: notes || null,
+          resolved_via_link_id: linkId,
+        })
+        .eq('task_id', task.id)
+        .in('object_id', targets)
+        .in('status', ['open', 'in_progress'])
+      if (updRes.error) {
+        // Не блокируем — связь уже создана, юзер увидит её в блоке.
+        // Можно показать предупреждение, но возврат ошибки тут заставит юзера
+        // думать что link не создан. Делаем await load + return null.
+        console.error('cascade resolve failed:', updRes.error.message)
+      }
+    }
+
+    await load()
+    return null
+  }
+
+  // Удаление связи. Для raised_from→meeting триггер откатит tasks.meeting_id=NULL.
+  async function deleteTaskLink(linkId: string): Promise<void> {
+    const link = taskLinks.find((l) => l.id === linkId)
+    const confirmMsg = link?.link_type === 'raised_from' && link.to_type === 'meeting'
+      ? 'Удалить связь «Постановка → собрание»? tasks.meeting_id обнулится (через триггер sync). Продолжить?'
+      : 'Удалить связь?'
+    if (!confirm(confirmMsg)) return
+    const { error } = await supabase.from('entity_links').delete().eq('id', linkId)
     if (error) { alert(error.message); return }
     await load()
   }
@@ -191,7 +523,19 @@ export default function TasksPage() {
     await load()
   }
 
-  // Fast-path: применить статус ко всем объектам задачи + к самой задаче (для legacy без object_ids).
+  // Fast-path для общего статуса (агрегата) задачи.
+  //
+  // ВАЖНО: НЕ ПЕРЕПИСЫВАТЬ существующие финальные статусы (`cancelled` / `done` /
+  // `closed`) на новый. Это нарушает per-object историю — например если задача
+  // была отменена на объекте А (cancelled) и активна на Б (open), то агрегатный
+  // переход в «done» должен закрывать только Б; cancelled на А оставить как есть.
+  // Ранее переписывались ВСЕ строки → инцидент 08.05.2026 (5 задач).
+  //
+  // Разрешённые переходы:
+  //   • → done / closed / cancelled  — затрагивают только active (open / in_progress)
+  //   • → open / in_progress         — затрагивают только cancelled (re-open).
+  //                                    done/closed не трогаем — это финал.
+  //   • → preliminary                — не используем junction (только tasks.status)
   async function changeAggregateStatus(task: Task, newStatus: Task['status']) {
     const today = new Date().toISOString().slice(0, 10)
 
@@ -205,7 +549,7 @@ export default function TasksPage() {
       return
     }
 
-    // Преliminary → не задействуем junction (preliminary живёт на уровне tasks.status)
+    // Преliminary → не задействуем junction
     if (newStatus === 'preliminary') {
       const { error } = await supabase.from('tasks').update({ status: 'preliminary' }).eq('id', task.id)
       if (error) { alert(error.message); return }
@@ -213,12 +557,48 @@ export default function TasksPage() {
       return
     }
 
-    // Все объекты задачи получают новый статус через junction
-    const rows = task.object_ids.map((oid) => ({
+    // Загружаем актуальные per-object статусы
+    const { data: currentTos, error: loadErr } = await supabase
+      .from('task_object_status')
+      .select('object_id, status')
+      .eq('task_id', task.id)
+    if (loadErr) { alert(loadErr.message); return }
+
+    // Подходящие текущие статусы для перехода
+    let allowedFrom: string[] = []
+    if (['done', 'closed', 'cancelled'].includes(newStatus)) {
+      allowedFrom = ['open', 'in_progress']
+    } else if (['open', 'in_progress'].includes(newStatus)) {
+      allowedFrom = ['cancelled']
+    }
+
+    const targetRows = (currentTos ?? []).filter((r) =>
+      allowedFrom.includes(r.status as string),
+    )
+
+    if (targetRows.length === 0) {
+      alert(
+        `Нет объектов с подходящим статусом для перехода в «${STATUS_LABELS[newStatus]}». ` +
+        `Если нужно изменить cancelled/done строки — используй редактор «Статусы по объектам» ниже.`,
+      )
+      return
+    }
+
+    // Подсказка пользователю если есть строки которые НЕ изменим
+    const skipped = (currentTos ?? []).length - targetRows.length
+    if (skipped > 0) {
+      const ok = confirm(
+        `Будет изменено ${targetRows.length} объект(ов). ` +
+        `${skipped} объект(ов) с финальным статусом (cancelled/done/closed) не трогаем — измени их вручную в редакторе ниже, если нужно.`,
+      )
+      if (!ok) return
+    }
+
+    const rows = targetRows.map((r) => ({
       task_id: task.id,
-      object_id: oid,
+      object_id: r.object_id as string,
       status: newStatus,
-      done_date: ['done','closed'].includes(newStatus) ? today : null,
+      done_date: ['done', 'closed'].includes(newStatus) ? today : null,
       done_note: null,
     }))
     const { error } = await supabase
@@ -238,41 +618,94 @@ export default function TasksPage() {
     await load()
   }
 
-  // Фильтрация
-  const filtered = useMemo(() => {
-    return tasks.filter((t) => {
-      if (filterStatus === 'active' && !['open', 'in_progress'].includes(t.status)) return false
-      if (filterStatus === 'preliminary' && t.status !== 'preliminary') return false
-      if (filterStatus === 'done' && !['done', 'closed'].includes(t.status)) return false
-      if (filterStatus !== 'active' && filterStatus !== 'all'
-          && filterStatus !== 'preliminary' && filterStatus !== 'done'
-          && filterStatus !== '' && t.status !== filterStatus) return false
-      if (filterEntity && t.assignee_entity_id !== filterEntity) return false
-      if (filterObject && !t.object_ids.includes(filterObject)) return false
-      if (filterPriority && t.priority !== filterPriority) return false
-      if (filterOverdue && !isOverdue(t)) return false
-      if (search) {
-        const q = search.toLowerCase()
-        const hay = (t.code + ' ' + t.title + ' ' + (t.explanation || '')).toLowerCase()
-        if (!hay.includes(q)) return false
+  // Фильтрация. Если задан objCtx (контекст объекта — выбранный filterObject
+  // или группа при groupBy='object') — статус и просрочка берутся per-object
+  // из task_object_status. Иначе — агрегат tasks.status.
+  //
+  // ВАЖНО: при группировке по объекту passesFilter вызывается для каждой
+  // группы со своим objCtx. Это нужно чтобы задача, отменённая на объекте 102
+  // (но активная на 301), при фильтре «Активные» отображалась только в группе
+  // 301, а из группы 102 исчезала (а не висела с красной плашкой «Отменена»).
+  function passesFilter(t: Task, objCtx: string | null): boolean {
+    const effectiveStatus: Task['status'] = objCtx
+      ? getObjectStatus(t, objCtx)
+      : t.status
+
+    if (filterStatus === 'active' && !['open', 'in_progress'].includes(effectiveStatus)) return false
+    if (filterStatus === 'preliminary' && effectiveStatus !== 'preliminary') return false
+    if (filterStatus === 'done' && !['done', 'closed'].includes(effectiveStatus)) return false
+    if (filterStatus !== 'active' && filterStatus !== 'all'
+        && filterStatus !== 'preliminary' && filterStatus !== 'done'
+        && filterStatus !== '' && effectiveStatus !== filterStatus) return false
+    if (filterEntity && t.assignee_entity_id !== filterEntity) return false
+    if (filterObject && !t.object_ids.includes(filterObject)) return false
+    if (filterPriority && t.priority !== filterPriority) return false
+    if (filterOverdue && !isOverdueOn(t, objCtx)) return false
+    if (filterStale && !isStaleTask(t)) return false
+    if (filterRelevance) {
+      if (filterRelevance === 'unrated') {
+        if (t.report_relevance !== null) return false
+      } else {
+        if (t.report_relevance !== filterRelevance) return false
       }
-      return true
-    })
-  }, [tasks, filterStatus, filterEntity, filterObject, filterPriority, filterOverdue, search])
+    }
+    if (search) {
+      const q = search.toLowerCase()
+      const hay = (t.code + ' ' + t.title + ' ' + (t.explanation || '')).toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    return true
+  }
+
+  const filtered = useMemo(() => {
+    return tasks.filter((t) => passesFilter(t, filterObject || null))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks, objStatusMap, filterStatus, filterEntity, filterObject, filterPriority, filterOverdue, filterStale, filterRelevance, sortByRelevance, search, staleByTaskId])
 
   // Сортировка задач внутри группы:
   // 1. Не выполненные (open/in_progress/preliminary) — впереди
   // 2. Среди не выполненных — самые старые сверху (по created_at ASC)
   // 3. Выполненные — после, новые сверху
+  // Дата постановки задачи: meeting_date через meeting_id JOIN (день когда задача
+  // была поднята на собрании). Fallback на tasks.created_at для legacy задач
+  // без meeting_id. См. WIKI 19 раздел «Жизненный цикл связей» — это «дата
+  // фазы raised_from».
+  function taskRaisedDate(t: Task): number {
+    const m = t.meeting_id ? meetings.find((x) => x.id === t.meeting_id) : null
+    const iso = m?.meeting_date ?? t.created_at
+    return new Date(iso).getTime()
+  }
+
+  // Сортировка по релевантности отчёта (critical→high→normal→low→skip→unrated).
+  // При равной релевантности — свежие задачи сверху.
+  function relevanceRank(t: Task): number {
+    if (t.report_relevance === null) return 99
+    return REPORT_RELEVANCE[t.report_relevance].sort
+  }
+
   function sortTasks(arr: Task[]): Task[] {
+    // Если включена сортировка по релевантности — приоритет ей (для пред-отчёта).
+    if (sortByRelevance) {
+      return [...arr].sort((a, b) => {
+        const ra = relevanceRank(a)
+        const rb = relevanceRank(b)
+        if (ra !== rb) return ra - rb
+        return taskRaisedDate(b) - taskRaisedDate(a)
+      })
+    }
+    // Сортировка по дате постановки DESC (свежие сверху). Статус-приоритет
+    // (активные сверху, закрытые снизу) сохраняем только для группировок —
+    // в режиме 'none' пользователь обычно фильтрует по статусу отдельно,
+    // и доп. разделение мешает хронологии.
+    if (groupBy === 'none') {
+      return [...arr].sort((a, b) => taskRaisedDate(b) - taskRaisedDate(a))
+    }
     return [...arr].sort((a, b) => {
       const aActive = ['open', 'in_progress', 'preliminary'].includes(a.status) ? 0 : 1
       const bActive = ['open', 'in_progress', 'preliminary'].includes(b.status) ? 0 : 1
       if (aActive !== bActive) return aActive - bActive
-      const aDate = new Date(a.created_at).getTime()
-      const bDate = new Date(b.created_at).getTime()
-      // не выполненные — старые сверху; выполненные — свежие сверху
-      return aActive === 0 ? aDate - bDate : bDate - aDate
+      // Активные — свежие сверху (новые задачи в начале); выполненные — тоже свежие сверху
+      return taskRaisedDate(b) - taskRaisedDate(a)
     })
   }
 
@@ -339,13 +772,34 @@ export default function TasksPage() {
       }).sort((a, b) => b.items.length - a.items.length)
     }
     // groupBy === 'object'
+    // by-link: задача появляется в каждой группе своих object_ids (как раньше)
+    // by-task: задача появляется только в одной группе — самой первой по
+    //          сортировке code (стабильный выбор: «primary» объект задачи)
+    //
+    // ВАЖНО: фильтр применяется per-object для каждого кандидата-объекта,
+    // поэтому идём не от filtered, а от tasks. Иначе задача с агрегатом 'open'
+    // и per-object 'cancelled' на объекте X висела бы в группе X.
     const map = new Map<string, Task[]>()
-    for (const t of filtered) {
-      if (!t.object_ids || t.object_ids.length === 0) {
+    for (const t of tasks) {
+      const objs = t.object_ids ?? []
+      if (objs.length === 0) {
+        if (!passesFilter(t, null)) continue
         if (!map.has('none')) map.set('none', [])
         map.get('none')!.push(t)
+        continue
+      }
+      if (objectViewMode === 'by-task') {
+        // Берём object с наименьшим code среди object_ids задачи
+        const sortedByCode = objs
+          .map((oid) => ({ oid, code: objects.find((x) => x.id === oid)?.code ?? oid }))
+          .sort((a, b) => a.code.localeCompare(b.code))
+        const primary = sortedByCode[0]?.oid ?? objs[0]
+        if (!passesFilter(t, primary)) continue
+        if (!map.has(primary)) map.set(primary, [])
+        map.get(primary)!.push(t)
       } else {
-        for (const oid of t.object_ids) {
+        for (const oid of objs) {
+          if (!passesFilter(t, oid)) continue
           if (!map.has(oid)) map.set(oid, [])
           map.get(oid)!.push(t)
         }
@@ -362,7 +816,12 @@ export default function TasksPage() {
       const bo = objects.find((x) => x.id === b.key)?.code ?? b.key
       return ao.localeCompare(bo)
     })
-  }, [filtered, groupBy, entities, objects])
+  // tasks/objStatusMap нужны потому что для groupBy='object' идём от tasks
+  // и зовём passesFilter (читает per-object статусы). Filter-state — потому
+  // что passesFilter замыкает их.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, tasks, objStatusMap, groupBy, objectViewMode, entities, objects,
+      filterStatus, filterEntity, filterObject, filterPriority, filterOverdue, filterStale, filterRelevance, sortByRelevance, search])
 
   const stats = useMemo(() => ({
     total: tasks.length,
@@ -378,7 +837,7 @@ export default function TasksPage() {
         <div className="flex items-center gap-4">
           <h1 className="text-2xl font-bold">Задачи</h1>
           <Link
-            href="/tasks/stats"
+            href="/reports/stats"
             className="text-sm px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-50"
           >
             📊 Статистика
@@ -425,7 +884,9 @@ export default function TasksPage() {
         >
           <option value="">Все объекты</option>
           {objects.map((o) => (
-            <option key={o.id} value={o.id}>{o.code} — {o.current_name}</option>
+            <option key={o.id} value={o.id} title={o.current_name}>
+              {optionIconPrefix(o.icon)}{o.code}
+            </option>
           ))}
         </select>
         <select
@@ -446,15 +907,62 @@ export default function TasksPage() {
           />
           Только просроченные
         </label>
+        <label
+          className="flex items-center text-sm gap-2 px-2"
+          title="Активные задачи, на которых есть события-references с датой позже срока. Сильный сигнал «фактически выполнена, но статус не обновлён»."
+        >
+          <input
+            type="checkbox"
+            checked={filterStale}
+            onChange={(e) => setFilterStale(e.target.checked)}
+          />
+          🕒 Висящие (есть события)
+        </label>
+        <select
+          value={filterRelevance}
+          onChange={(e) => setFilterRelevance(e.target.value)}
+          className="px-2 py-1.5 border rounded text-sm"
+          title="Релевантность задачи для отчёта"
+        >
+          <option value="">Все релевантности</option>
+          <option value="critical">🔥 Критично</option>
+          <option value="high">⭐ Важно</option>
+          <option value="normal">• Обычно</option>
+          <option value="low">○ Низкое</option>
+          <option value="skip">🚫 Не в отчёт</option>
+          <option value="unrated">— не оценено —</option>
+        </select>
+        <label
+          className="flex items-center text-sm gap-2 px-2"
+          title="Сортировать по релевантности для отчёта (важные сверху). Пред-отчёт: пройтись и закрыть/уточнить — итоговый LLM-отчёт станет точнее."
+        >
+          <input
+            type="checkbox"
+            checked={sortByRelevance}
+            onChange={(e) => setSortByRelevance(e.target.checked)}
+          />
+          🎯 По релевантности
+        </label>
         <select
           value={groupBy}
           onChange={(e) => setGroupBy(e.target.value as 'none' | 'entity' | 'object')}
           className="px-2 py-1.5 border rounded text-sm"
         >
+          <option value="none">Без группировки</option>
           <option value="entity">Группировать: по юр.лицу</option>
           <option value="object">Группировать: по объекту</option>
-          <option value="none">Без группировки</option>
         </select>
+        {groupBy === 'object' && (
+          <select
+            value={objectViewMode}
+            onChange={(e) => setObjectViewMode(e.target.value as 'by-link' | 'by-task')}
+            className="px-2 py-1.5 border rounded text-sm"
+            title="Как показывать задачу с несколькими объектами: в каждой группе своих объектов или один раз"
+          >
+            <option value="by-link">По связям (дубли в каждой группе)</option>
+            <option value="by-task">По задачам (один раз)</option>
+          </select>
+        )}
         <input
           type="text"
           value={search}
@@ -466,7 +974,12 @@ export default function TasksPage() {
 
       {loading ? (
         <div>Загрузка…</div>
-      ) : filtered.length === 0 ? (
+      ) : grouped.reduce((s, g) => s + g.items.length, 0) === 0 ? (
+        // Считаем по grouped, а не по filtered: при groupBy='object' группы
+        // строятся из tasks + passesFilter per-object, и могут содержать задачи
+        // которых нет в filtered (агрегат не подходит, но per-object — да),
+        // и наоборот — задача с агрегатом 'open' и cancelled на всех объектах
+        // в группах не покажется, хотя filtered её содержит.
         <div className="bg-white rounded shadow p-6 text-center text-gray-400">
           Нет задач по выбранным фильтрам
         </div>
@@ -501,6 +1014,7 @@ export default function TasksPage() {
                   <thead className="bg-gray-50 border-b text-left">
                     <tr>
                       <th className="px-3 py-2 w-32">Код</th>
+                      <th className="px-3 py-2 w-24">Постановка</th>
                       <th className="px-3 py-2">Задача</th>
                       <th className="px-3 py-2 w-32">Объекты</th>
                       <th className="px-3 py-2 w-24">Приоритет</th>
@@ -522,8 +1036,44 @@ export default function TasksPage() {
                         onClick={() => setOpened(t)}
                       >
                         <td className="px-3 py-2 font-mono text-xs text-gray-500">{t.code}</td>
+                        <td className="px-3 py-2 text-xs text-gray-600">
+                          {/* Дата постановки = meeting_date через meeting_id (см. taskRaisedDate).
+                              Fallback на created_at если meeting_id NULL. */}
+                          {(() => {
+                            const m = t.meeting_id ? meetings.find((x) => x.id === t.meeting_id) : null
+                            return formatDate(m?.meeting_date ?? t.created_at)
+                          })()}
+                        </td>
                         <td className="px-3 py-2">
-                          <div className="font-medium text-gray-900 line-clamp-1">{t.title}</div>
+                          <div className="font-medium text-gray-900 line-clamp-1 flex items-center gap-1">
+                            {/* Релевантность для отчёта (📊): кликом — модал задачи */}
+                            {t.report_relevance && (
+                              <span
+                                title={`Релевантность для отчёта: ${REPORT_RELEVANCE[t.report_relevance].label}`}
+                                className={`flex-shrink-0 px-1 rounded text-xs ${REPORT_RELEVANCE[t.report_relevance].color}`}
+                              >
+                                {REPORT_RELEVANCE[t.report_relevance].icon}
+                              </span>
+                            )}
+                            {(() => {
+                              const info = staleByTaskId.get(t.id)
+                              const stale = isStaleTask(t)
+                              if (!stale || !info) return null
+                              const d = info.latestEventDate
+                              const dHuman = new Date(d + 'T00:00:00').toLocaleDateString('ru-RU', {
+                                day: '2-digit', month: '2-digit',
+                              })
+                              return (
+                                <span
+                                  title={`Есть событие "${info.latestEvent.title}" от ${d} (после срока). Возможно задача фактически выполнена.`}
+                                  className="text-amber-600 flex-shrink-0 cursor-help"
+                                >
+                                  💡{dHuman}
+                                </span>
+                              )
+                            })()}
+                            <span className="line-clamp-1">{t.title}</span>
+                          </div>
                           {t.explanation && (
                             <div className="text-xs text-gray-500 line-clamp-1 mt-0.5">
                               {t.explanation}
@@ -532,21 +1082,30 @@ export default function TasksPage() {
                         </td>
                         <td className="px-3 py-2">
                           <div className="flex flex-wrap gap-1">
-                            {(t.object_ids ?? []).slice(0, 2).map((oid) => {
+                            {(t.object_ids ?? []).slice(0, 3).map((oid) => {
                               const o = objects.find((x) => x.id === oid)
-                              const label = o?.current_name || oid.slice(0, 8)
+                              const label = o?.code || oid.slice(0, 8)
+                              // Чип использует icon_small (32×32) для лёгкости; fallback на icon (если эмодзи).
+                              const smallImg = o?.icon_small
+                              const fullIsImg = o?.icon ? (o.icon.startsWith('data:image/') || /^https?:\/\//.test(o.icon)) : false
                               return (
                                 <span
                                   key={oid}
-                                  title={o?.code ?? oid}
-                                  className="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-700 text-xs rounded"
+                                  title={o?.current_name ?? oid}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-100 text-gray-700 text-[11px] font-mono rounded whitespace-nowrap border-l-2"
+                                  style={{ borderLeftColor: o?.color ?? '#cbd5e1' }}
                                 >
+                                  {smallImg
+                                    ? <img src={smallImg} alt="" className="w-3.5 h-3.5 object-contain" />
+                                    : fullIsImg
+                                      ? <img src={o!.icon!} alt="" className="w-3.5 h-3.5 object-contain" />
+                                      : o?.icon && <span aria-hidden>{o.icon}</span>}
                                   {label}
                                 </span>
                               )
                             })}
-                            {(t.object_ids ?? []).length > 2 && (
-                              <span className="text-xs text-gray-400">+{(t.object_ids ?? []).length - 2}</span>
+                            {(t.object_ids ?? []).length > 3 && (
+                              <span className="text-xs text-gray-400">+{(t.object_ids ?? []).length - 3}</span>
                             )}
                           </div>
                         </td>
@@ -643,14 +1202,58 @@ export default function TasksPage() {
                   <p>{opened.priority ? PRIORITY_LABEL[opened.priority] : '—'}</p>
                 </div>
                 <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1">
+                    Релевантность для отчёта
+                  </h3>
+                  <select
+                    value={opened.report_relevance ?? ''}
+                    onChange={async (e) => {
+                      const val = e.target.value || null
+                      const { error: upErr } = await supabase
+                        .from('tasks')
+                        .update({ report_relevance: val })
+                        .eq('id', opened.id)
+                      if (upErr) { alert(upErr.message); return }
+                      // optimistic local update
+                      setTasks((arr) => arr.map((x) => x.id === opened.id ? { ...x, report_relevance: val as Task['report_relevance'] } : x))
+                      setOpened({ ...opened, report_relevance: val as Task['report_relevance'] })
+                    }}
+                    className="px-2 py-1 border rounded text-sm w-full"
+                  >
+                    <option value="">— не оценена —</option>
+                    <option value="critical">🔥 Критично</option>
+                    <option value="high">⭐ Важно</option>
+                    <option value="normal">• Обычно</option>
+                    <option value="low">○ Низкое</option>
+                    <option value="skip">🚫 Не в отчёт</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Определяет приоритет задачи при формировании отчёта по объекту.
+                    Сортировка «🎯 По релевантности» на странице задач — для прохода
+                    по важным до генерации.
+                  </p>
+                </div>
+                <div>
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1">Ответственный</h3>
                   <p>
                     {entities.find((e) => e.id === opened.assignee_entity_id)?.name || opened.assignee_org || '—'}
                   </p>
                 </div>
                 <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1">Дата начала</h3>
+                  <input
+                    key={`start-${opened.id}`}
+                    type="date"
+                    defaultValue={opened.start_date ?? ''}
+                    onBlur={(e) => saveTaskDate(opened, 'start_date', e.target.value)}
+                    className="w-full px-2 py-1 border rounded"
+                    title="Дата начала работы над задачей (опционально)."
+                  />
+                </div>
+                <div>
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1">Срок</h3>
                   <input
+                    key={`due-${opened.id}`}
                     type="date"
                     defaultValue={opened.due_date ?? ''}
                     onBlur={(e) => saveTaskDate(opened, 'due_date', e.target.value)}
@@ -666,6 +1269,35 @@ export default function TasksPage() {
                     onChangeObjectStatus={changeObjectStatus}
                     onChangeObjectIds={changeObjectIds}
                     onChangeObjectDoneDate={saveObjectDoneDate}
+                    onReport={(oid) => setReportTarget({ task: opened, objectId: oid })}
+                  />
+                </div>
+                <div className="col-span-2">
+                  <EntityLinksBlock
+                    title="👤 Ответственные"
+                    links={taskLinks.filter((l) => l.from_id === opened.id)}
+                    phases={TASK_ASSIGNEE_PHASES}
+                    registry={{
+                      entities,
+                      contacts: contactsRef,
+                    }}
+                    onAdd={(linkType) => setAddLinkTarget({ task: opened, linkType: linkType as TaskLink['link_type'] })}
+                    onDelete={(linkId) => deleteTaskLink(linkId)}
+                  />
+                </div>
+                <div className="col-span-2">
+                  <EntityLinksBlock
+                    title="Связи задачи"
+                    links={taskLinks.filter((l) => l.from_id === opened.id)}
+                    phases={TASK_LINK_PHASES}
+                    registry={{
+                      meetings,
+                      events: eventsRef,
+                      documents: documentsRef,
+                      letters: lettersRef,
+                    }}
+                    onAdd={(linkType) => setAddLinkTarget({ task: opened, linkType: linkType as TaskLink['link_type'] })}
+                    onDelete={(linkId) => deleteTaskLink(linkId)}
                   />
                 </div>
               </div>
@@ -710,15 +1342,143 @@ export default function TasksPage() {
               )}
 
               <section className="text-xs text-gray-500 pt-3 border-t">
-                Источник: <span className="font-mono">{opened.source_protocol || '—'}</span>
-                {opened.source_meeting_date && <> · собрание {formatDate(opened.source_meeting_date)}</>}
+                {(() => {
+                  // Источник задачи — собрание-постановщик через meeting_id
+                  // (denormalized указатель, синхронизированный с entity_links.raised_from).
+                  // Отображение — через единый formatMeetingRef. См. lib/entityRef.ts.
+                  const m = opened.meeting_id
+                    ? meetings.find((x) => x.id === opened.meeting_id)
+                    : null
+                  if (!m) return <>Источник: <span className="text-gray-400">—</span></>
+                  const ref = formatMeetingRef(m)
+                  return (
+                    <span title={ref.tooltip}>
+                      Источник:{' '}
+                      <Link href={ref.href!} className="text-blue-600 hover:underline">
+                        <span className="mr-1">{ref.icon}</span>
+                        <span className="font-medium">{ref.label}</span>
+                      </Link>
+                      {ref.sublabel && <span className="text-gray-500"> · {ref.sublabel}</span>}
+                    </span>
+                  )
+                })()}
               </section>
             </div>
           </div>
         </div>
       )}
+
+      {/* Модалка «Отчитаться» — над модалкой задачи (z-60) чтобы перекрывать её */}
+      {reportTarget && (
+        <ReportCompletionModal
+          task={reportTarget.task}
+          objectId={reportTarget.objectId}
+          objects={objects}
+          entities={entities}
+          onClose={() => setReportTarget(null)}
+          onSubmit={async (args) => {
+            const err = await submitCompletionReport({
+              task: reportTarget.task,
+              objectId: reportTarget.objectId,
+              date: args.date,
+              note: args.note,
+              doneByEntityId: args.doneByEntityId,
+            })
+            if (!err) setReportTarget(null)
+            return err
+          }}
+        />
+      )}
+
+      {/* Модалка «+ Добавить связь» — универсальный EntityLinkPicker с
+          task-specific подсказками (hint) для raised_from и resolved_by фаз. */}
+      {addLinkTarget && (() => {
+        const phase = addLinkTarget.linkType
+        const isAssignee = phase === 'assigned_to'
+        // assigned_to: цели — контакт или юр.лицо. Остальные фазы — события/документы/письма/собрания.
+        const phaseMeta = isAssignee
+          ? TASK_ASSIGNEE_PHASES.find((p) => p.linkType === phase)
+          : TASK_LINK_PHASES.find((p) => p.linkType === phase)
+        const allowedToTypes = isAssignee
+          ? (['contact', 'legal_entity'] as const)
+          : (['meeting', 'event', 'document', 'letter'] as const)
+        const subtitleLabel = isAssignee ? 'Ответственные' : taskPhaseLabel(phase)
+        return (
+          <EntityLinkPicker
+            title="Добавить связь"
+            subtitle={`фаза «${phaseMeta?.icon ?? ''} ${subtitleLabel}»`}
+            fromEntity={{ code: addLinkTarget.task.code, title: addLinkTarget.task.title }}
+            allowedToTypes={[...allowedToTypes]}
+            registry={{
+              meetings,
+              events: eventsRef,
+              documents: documentsRef,
+              letters: lettersRef,
+              entities,
+              contacts: contactsRef,
+            }}
+            submitColor={phase === 'resolved_by' ? 'emerald' : 'blue'}
+            hint={
+              <PhaseHint
+                linkType={phase}
+                // Передаём текущий toType из формы — но компонент его рендерит
+                // целиком, так что используем простой подход: показываем все
+                // подсказки и пусть юзер видит контекст.
+              />
+            }
+            onClose={() => setAddLinkTarget(null)}
+            onSubmit={async (args) => {
+              // Multi-select: пакетно создаём связи последовательно. На первой
+              // ошибке прекращаем и возвращаем сообщение (уже созданные связи
+              // остаются — load() их подтянет).
+              for (const toId of args.toIds) {
+                const err = await addTaskLink({
+                  task: addLinkTarget.task,
+                  linkType: phase,
+                  toType: args.toType as TaskLink['to_type'],
+                  toId,
+                  notes: args.notes,
+                })
+                if (err) return err
+              }
+              setAddLinkTarget(null)
+              return null
+            }}
+          />
+        )
+      })()}
     </div>
   )
+}
+
+// ─── Подсказки для пользователя в зависимости от фазы ─────────────────────
+function PhaseHint({ linkType }: { linkType: TaskLink['link_type'] }) {
+  if (linkType === 'raised_from') {
+    return (
+      <div className="text-[11px] text-amber-700 bg-amber-50 rounded p-2">
+        ⚠ Если выбрано <b>Собрание</b> — триггер sync обновит <code>tasks.meeting_id</code> на выбранное.
+      </div>
+    )
+  }
+  if (linkType === 'resolved_by') {
+    return (
+      <div className="text-[11px] text-emerald-700 bg-emerald-50 rounded p-2">
+        ✓ Статус задачи на пересекающихся объектах автоматически переведётся в «Выполнено»
+        (только для активных строк, финальные cancelled/done не трогаем). Для документа/письма
+        (без object_ids) — закроем <b>все</b> объекты задачи.
+      </div>
+    )
+  }
+  if (linkType === 'assigned_to') {
+    return (
+      <div className="text-[11px] text-purple-700 bg-purple-50 rounded p-2">
+        👤 Можно добавить несколько ответственных. Для <b>организации</b> (Юр.лицо) триггер sync
+        обновит <code>tasks.assignee_entity_id</code> (если ещё не задано). Для <b>контакта</b> —
+        связь сохраняется только в entity_links.
+      </div>
+    )
+  }
+  return null
 }
 
 // ─── Per-object редактор статусов задачи ────────────────────────────────────
@@ -733,6 +1493,7 @@ function ObjectStatusEditor({
   onChangeObjectStatus,
   onChangeObjectIds,
   onChangeObjectDoneDate,
+  onReport,
 }: {
   task: Task
   objects: ObjectRef[]
@@ -744,6 +1505,7 @@ function ObjectStatusEditor({
   ) => void
   onChangeObjectIds: (task: Task, ids: string[]) => void
   onChangeObjectDoneDate: (taskId: string, objectId: string, value: string) => void
+  onReport: (objectId: string) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<string[]>(task.object_ids ?? [])
@@ -780,16 +1542,17 @@ function ObjectStatusEditor({
             {objects.map((o) => {
               const checked = draft.includes(o.id)
               return (
-                <label key={o.id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-white px-1 py-0.5 rounded">
+                <label key={o.id} className="flex items-center gap-3 text-xs cursor-pointer hover:bg-white px-1 py-0.5 rounded">
                   <input
                     type="checkbox"
                     checked={checked}
                     onChange={() => {
                       setDraft((d) => checked ? d.filter((x) => x !== o.id) : [...d, o.id])
                     }}
+                    className="shrink-0"
                   />
-                  <span className="font-mono text-gray-500 w-24 shrink-0">{o.code}</span>
-                  <span>{o.current_name}</span>
+                  <span className="font-mono text-gray-500 shrink-0 whitespace-nowrap">{o.code}</span>
+                  <span className="truncate">{o.current_name}</span>
                 </label>
               )
             })}
@@ -822,9 +1585,9 @@ function ObjectStatusEditor({
             const r = objStatusMap.get(`${task.id}|${oid}`)
             const status = (r?.status ?? task.status) as Task['status']
             return (
-              <div key={oid} className="flex items-center gap-2 px-2 py-1 bg-gray-50 rounded text-xs">
-                <span className="font-mono text-gray-500 w-24 shrink-0">{o?.code ?? oid.slice(0, 8)}</span>
-                <span className="flex-1 truncate text-gray-700">{o?.current_name ?? '—'}</span>
+              <div key={oid} className="flex items-center gap-3 px-2 py-1 bg-gray-50 rounded text-xs">
+                <span className="font-mono text-gray-500 shrink-0 whitespace-nowrap">{o?.code ?? oid.slice(0, 8)}</span>
+                <span className="flex-1 min-w-0 truncate text-gray-700">{o?.current_name ?? '—'}</span>
                 {task.status === 'preliminary' ? (
                   <span className="px-2 py-0.5 rounded bg-gray-200 text-gray-600">Черновик</span>
                 ) : (
@@ -850,11 +1613,162 @@ function ObjectStatusEditor({
                     title="Дата выполнения по этому объекту"
                   />
                 )}
+                {/* Кнопка «✓ Отчитаться» — структурное закрытие задачи на объекте
+                    через создание event(project_note) + entity_links(resolved_by).
+                    Доступна только если задача ещё активна на этом объекте. */}
+                {task.status !== 'preliminary' && ['open', 'in_progress'].includes(status) && (
+                  <button
+                    onClick={() => onReport(oid)}
+                    className="px-2 py-0.5 text-[11px] bg-emerald-600 text-white rounded hover:bg-emerald-700 shrink-0"
+                    title="Создать отчёт о выполнении задачи на этом объекте (event + связь resolved_by + закрытие)"
+                  >
+                    ✓ Отчитаться
+                  </button>
+                )}
               </div>
             )
           })}
         </div>
       )}
+    </div>
+  )
+}
+
+// Конфиг фаз — см. const TASK_LINK_PHASES в начале файла.
+// Блок отображения переиспользует @/components/EntityLinksBlock.
+
+// ─── Модалка «Отчитаться» ─────────────────────────────────────────────────
+// Создаёт отчёт о выполнении задачи на конкретном объекте: новое event'е
+// (project_note) + entity_link фазы resolved_by + обновление task_object_status.
+// См. WIKI 19_Сущность_Задача «v2.4».
+
+function ReportCompletionModal({
+  task,
+  objectId,
+  objects,
+  entities,
+  onClose,
+  onSubmit,
+}: {
+  task: Task
+  objectId: string
+  objects: ObjectRef[]
+  entities: LegalEntity[]
+  onClose: () => void
+  onSubmit: (args: { date: string; note: string; doneByEntityId: string | null }) => Promise<string | null>
+}) {
+  const obj = objects.find((o) => o.id === objectId)
+  const today = new Date().toISOString().slice(0, 10)
+  const [date, setDate] = useState(today)
+  const [note, setNote] = useState('')
+  const [doneByEntityId, setDoneByEntityId] = useState<string>(task.assignee_entity_id ?? '')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleSubmit() {
+    setSubmitting(true)
+    setError(null)
+    const err = await onSubmit({ date, note: note.trim(), doneByEntityId: doneByEntityId || null })
+    setSubmitting(false)
+    if (err) setError(err)
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b">
+          <div className="text-[11px] text-gray-500 uppercase tracking-wider">Отчёт о выполнении</div>
+          <h2 className="text-lg font-semibold mt-0.5">{task.title}</h2>
+          <div className="text-xs text-gray-500 mt-1">
+            <span className="font-mono">{task.code}</span>
+            {obj && <> · объект: <span className="font-mono">{obj.code}</span> — {obj.current_name}</>}
+          </div>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Дата выполнения
+            </label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="w-full px-2 py-1.5 border rounded text-sm"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              От кого (юр.лицо)
+            </label>
+            <select
+              value={doneByEntityId}
+              onChange={(e) => setDoneByEntityId(e.target.value)}
+              className="w-full px-2 py-1.5 border rounded text-sm"
+            >
+              <option value="">— не указано —</option>
+              {entities.map((e) => (
+                <option key={e.id} value={e.id}>{e.name}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              По умолчанию — ответственный из задачи. Можно изменить если отчитывается другая сторона.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Примечание (что сделано, чем подтверждается)
+            </label>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              rows={4}
+              className="w-full px-2 py-1.5 border rounded text-sm"
+              placeholder="Краткий комментарий: что сделано, ссылка/название документа-подтверждения, и т.п."
+            />
+          </div>
+
+          {error && (
+            <div className="px-3 py-2 bg-red-50 text-red-700 text-xs rounded">
+              {error}
+            </div>
+          )}
+
+          <div className="text-[11px] text-gray-500 bg-gray-50 rounded p-2">
+            <b>Что произойдёт при сохранении:</b>
+            <ul className="list-disc pl-4 mt-1 space-y-0.5">
+              <li>Создастся событие «Выполнено: {task.code}» (тип <code>project_note</code>)</li>
+              <li>Связь задача → событие с фазой <code>resolved_by</code></li>
+              <li>Статус задачи на этом объекте → «Выполнено»</li>
+            </ul>
+          </div>
+        </div>
+
+        <div className="p-4 border-t flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 text-sm border rounded hover:bg-gray-50"
+            disabled={submitting}
+          >
+            Отмена
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={submitting}
+            className="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {submitting ? 'Сохраняется…' : '✓ Отчитаться'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

@@ -16,16 +16,19 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { randomUUID } from 'crypto'
 import { supabaseAdmin } from '@/lib/supabase-admin'
 import { findOrCreateLegalEntity } from '@/lib/legalEntities/findOrCreate'
 import { indexDocumentChunks } from '@/lib/vector/indexDocument'
 import { buildClauseRows } from '@/lib/contracts/buildClauseRows'
 import type { ContractAnalysis } from '@/lib/parser/extractClauses'
+import type { ContractStageInfo } from '@/lib/parser/extractContractStages'
 
 interface SavePayload {
   analysis: ContractAnalysis
   object_codes: string[]   // выбранные оператором (могут отличаться от LLM-предложения)
   extractedText?: string   // полный текст для индексации
+  contract_stages?: ContractStageInfo[]  // этапы договора (проход 1, если выделены)
 }
 
 const sanitize = (s: string) => s
@@ -36,7 +39,7 @@ const sanitize = (s: string) => s
 
 export async function POST(request: NextRequest) {
   try {
-    const { analysis, object_codes, extractedText } = await request.json() as SavePayload
+    const { analysis, object_codes, extractedText, contract_stages = [] } = await request.json() as SavePayload
 
     if (!analysis) {
       return NextResponse.json({ error: 'analysis required' }, { status: 400 })
@@ -135,9 +138,111 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 4. contract_clauses — якорный пункт «Дата заключения договора» + пункты от LLM
+    // 4. contract_stages — этапы договора (проход 1 LLM, если есть)
+    const stageIdMap = new Map<number, string>()  // stage_number → stage.id
+    let defaultStageId: string | null = null
+    if (contract_stages.length > 0) {
+      const stageRows = contract_stages.map((s, idx) => {
+        const sid = randomUUID()
+        stageIdMap.set(s.stage_number, sid)
+        if (idx === 0) defaultStageId = sid
+        return {
+          id:           sid,
+          document_id:  doc.id,
+          stage_number: s.stage_number,
+          stage_name:   s.stage_name,
+          description:  s.description,
+          sort_order:   s.sort_order ?? idx + 1,
+          source_page:  s.source_page,
+          source_quote: s.source_quote,
+          is_default:   idx === 0,
+        }
+      })
+      const { error: csErr } = await supabaseAdmin.from('contract_stages').insert(stageRows)
+      if (csErr) {
+        console.error('[v2/save] contract_stages:', csErr.message)
+        return NextResponse.json({ error: `stages insert: ${csErr.message}` }, { status: 500 })
+      }
+    }
+
+    // 4.5. contract_clauses — якорь + пункты от LLM (с резолвом stage_id и event_type_id)
+    // Замечание: с 2026-05-15 первичная загрузка /analyze не извлекает clauses
+    // (метаданные only) — clauses появляются на странице договора через
+    // «🎯 Выделить события договора» (см. /reparse skip_stages). Эта секция
+    // оставлена для совместимости и для случаев, когда clauses передадут в /save.
     const clauses = analysis.clauses ?? []
     const clauseRows = buildClauseRows(doc.id, analysis.signed_date, clauses)
+
+    // Резолв event_type_code → event_type_id (для якоря и LLM-clauses).
+    // Также подтягиваем коды из term_ref_event_type_code — для авто-резолва ссылок.
+    const allCodes = Array.from(new Set([
+      ...clauses.map(c => c.event_type_code).filter((x): x is string => !!x),
+      ...clauses.map(c => c.term_ref_event_type_code).filter((x): x is string => !!x),
+    ]))
+    const typeIdByCode = new Map<string, string>()
+    if (allCodes.length > 0 || clauseRows.some(r => r.is_anchor)) {
+      const codesToFetch = [...allCodes, 'legal_contract_sign']
+      const { data: types } = await supabaseAdmin
+        .from('contract_event_types')
+        .select('id, code')
+        .in('code', codesToFetch)
+      for (const t of (types ?? []) as { id: string; code: string }[]) {
+        typeIdByCode.set(t.code, t.id)
+      }
+    }
+
+    let llmIdx = 0
+    for (const r of clauseRows) {
+      if (r.is_anchor) {
+        r.event_type_id = typeIdByCode.get('legal_contract_sign') ?? null
+        continue
+      }
+      const sourceClause = clauses[llmIdx]
+      llmIdx += 1
+      if (!sourceClause) continue
+      const sn = sourceClause.stage_number ?? null
+      if (sn != null) {
+        const sid = stageIdMap.get(sn) ?? null
+        if (sid) r.stage_id = sid
+      }
+      const tc = sourceClause.event_type_code ?? null
+      if (tc) {
+        const tid = typeIdByCode.get(tc) ?? null
+        if (tid) r.event_type_id = tid
+      }
+    }
+
+    // ─── Второй проход: резолв term_ref_clause_id по структурной ссылке ───
+    // См. /clauses/replace для аналогичной логики и комментариев.
+    {
+      let llmIdx2 = 0
+      for (const r of clauseRows) {
+        if (r.is_anchor) continue
+        const sourceClause = clauses[llmIdx2]
+        llmIdx2 += 1
+        if (!sourceClause) continue
+        if (r.term_ref_clause_id) continue
+
+        const refCode = sourceClause.term_ref_event_type_code ?? null
+        if (!refCode) continue
+        const refTypeId = typeIdByCode.get(refCode) ?? null
+        if (!refTypeId) continue
+
+        const refStageNum = sourceClause.term_ref_stage_number ?? null
+        const refStageId = refStageNum != null ? (stageIdMap.get(refStageNum) ?? null) : null
+
+        const candidates = clauseRows.filter(o =>
+          o.id !== r.id &&
+          o.event_type_id === refTypeId &&
+          (refStageId === null || o.stage_id === refStageId)
+        )
+        if (candidates.length === 1) {
+          r.term_ref_clause_id = candidates[0].id
+          r.term_base = 'clause'
+        }
+      }
+    }
+
     if (clauseRows.length) {
       const { error: ccErr } = await supabaseAdmin
         .from('contract_clauses')
@@ -146,6 +251,14 @@ export async function POST(request: NextRequest) {
         console.error('[v2/save] contract_clauses:', ccErr.message)
         return NextResponse.json({ error: ccErr.message }, { status: 500 })
       }
+    }
+
+    // 4.6 Установить current_stage_id = первому этапу
+    if (defaultStageId) {
+      await supabaseAdmin
+        .from('documents')
+        .update({ current_stage_id: defaultStageId })
+        .eq('id', doc.id)
     }
 
     // 4.1 Авто-пополнение objects.aliases («Публичные имена») именами из текста договора.
