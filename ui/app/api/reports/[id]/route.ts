@@ -491,7 +491,7 @@ export async function PATCH(
   }
 
   const update: Record<string, string | boolean | null> = {}
-  for (const k of ['summary_md', 'title']) {
+  for (const k of ['summary_md', 'title', 'appendix_report_id']) {
     if (k in body) {
       const v = body[k]
       update[k] = typeof v === 'string' ? v : v == null ? null : String(v)

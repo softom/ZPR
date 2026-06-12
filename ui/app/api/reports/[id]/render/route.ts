@@ -48,6 +48,34 @@ export async function GET(
       return (a.object?.code ?? '').localeCompare(b.object?.code ?? '')
     })
 
+  // contract — отчёт по договору ТЗ: документ (summary_md) + подшитое Приложение
+  // (выбранный месячный отчёт ЗПР, отрендеренный как есть). Только .md.
+  if (reportRes.data.period_type === 'contract') {
+    let appendixMd = ''
+    const appId = (reportRes.data as { appendix_report_id?: string | null }).appendix_report_id
+    if (appId) {
+      const [appR, appS] = await Promise.all([
+        supabaseAdmin.from('reports').select('*').eq('id', appId).single(),
+        supabaseAdmin.from('object_reports').select('*').eq('report_id', appId),
+      ])
+      if (appR.data) {
+        const appSections = (appS.data ?? [])
+          .map((s) => ({ ...s, object: objectsById.get(s.object_id) ?? null }))
+          .sort((a, b) => (a.object?.code ?? '').localeCompare(b.object?.code ?? ''))
+        appendixMd = appR.data.period_type === 'week'
+          ? renderWeeklyV3Markdown(appR.data, appSections)
+          : renderMarkdown(appR.data, appSections)
+      }
+    }
+    const md = renderContractMarkdown(reportRes.data, appendixMd)
+    return new NextResponse(md, {
+      headers: {
+        'Content-Type': 'text/markdown; charset=utf-8',
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent('Отчёт_по_договору_' + reportRes.data.period_start)}.md`,
+      },
+    })
+  }
+
   // Для week v3 и control — подтягиваем договоры объектов с текущим этапом
   // (нужны для блока «Сводка/Договоры» в обоих типах рендера).
   if (reportRes.data.period_type === 'week' || reportRes.data.period_type === 'control') {
@@ -153,8 +181,11 @@ export async function GET(
   }
 
   const isControl = reportRes.data.period_type === 'control'
+  const isShort = reportRes.data.period_type === 'short'
   const filenameBase = isControl
     ? `Справка_ТЗ_${reportRes.data.period_start}`
+    : isShort
+    ? `Короткая_справка_${reportRes.data.period_start}`
     : `Отчёт_${reportRes.data.period_type}_${reportRes.data.period_start}`
 
   if (format === 'docx') {
@@ -171,6 +202,8 @@ export async function GET(
   // md
   const md = isControl
     ? renderControlMarkdown(reportRes.data, sections)
+    : isShort
+    ? renderShortMarkdown(reportRes.data, sections)
     : reportRes.data.period_type === 'week'
       ? renderWeeklyV3Markdown(reportRes.data, sections)
       : renderMarkdown(reportRes.data, sections)
@@ -183,7 +216,7 @@ export async function GET(
 }
 
 type ReportRow = {
-  period_type: 'week' | 'month' | 'control'
+  period_type: 'week' | 'month' | 'control' | 'short' | 'contract'
   period_start: string
   period_end: string
   title: string | null
@@ -467,9 +500,9 @@ function renderControlSection(s: SectionRow): string[] {
   }
   out.push('')
 
-  // ── 1. Нарратив ─────────────────────────────────────────────────
-  out.push(`#### 1. Нарратив`, '')
-  out.push(s.narrative?.trim() || '*— нарратив не заполнен —*', '')
+  // ── 1. Работы отчётного периода ─────────────────────────────────
+  out.push(`#### 1. Работы отчётного периода`, '')
+  out.push(s.narrative?.trim() || '*— раздел не заполнен —*', '')
 
   // ── 2. Этапы договора со сроками ────────────────────────────────
   if (s.contract_summary && s.contract_summary.trim().length > 0) {
@@ -477,12 +510,51 @@ function renderControlSection(s: SectionRow): string[] {
     out.push(s.contract_summary.trim(), '')
   }
 
-  // ── 3. Ключевые решения и поручения ─────────────────────────────
+  // ── 3. Общее состояние работ ────────────────────────────────────
   if (s.decisions && s.decisions.trim().length > 0) {
-    out.push(`#### 3. Ключевые решения и поручения`, '')
+    out.push(`#### 3. Общее состояние работ`, '')
     out.push(s.decisions.trim(), '')
+  }
+
+  // ── 4. Текущие задачи и планы ───────────────────────────────────
+  if (s.next_period_tasks && s.next_period_tasks.trim().length > 0) {
+    out.push(`#### 4. Текущие задачи и планы`, '')
+    out.push(s.next_period_tasks.trim(), '')
   }
 
   out.push('---', '')
   return out
+}
+
+// Короткая справка: утверждённые заказчиком варианты «в работу» (по объектам).
+//   narrative — вступление, decisions — список вариантов.
+function renderShortMarkdown(report: ReportRow, sections: SectionRow[]): string {
+  const lines: string[] = []
+  const formed = new Date(report.period_start).toLocaleDateString('ru-RU', {
+    day: 'numeric', month: 'long', year: 'numeric',
+  })
+  lines.push(`# ${report.title ?? `Короткая справка на ${formed}`}`, '')
+  lines.push(`_Утверждённые заказчиком варианты в дальнейшую работу (накопительно на ${formed})._`, '', '---', '')
+  for (const s of sections) {
+    if (!s.object) continue
+    lines.push(`## ${s.object.code} — ${s.object.current_name}`, '')
+    if (s.narrative?.trim()) lines.push(s.narrative.trim(), '')
+    if (s.achievements?.trim()) lines.push(`**Утверждённые варианты (№№):** ${s.achievements.trim()}`, '')
+    if (s.decisions?.trim()) lines.push('**Перечень:**', '', s.decisions.trim(), '')
+    if (!s.narrative?.trim() && !s.achievements?.trim() && !s.decisions?.trim()) {
+      lines.push('_— раздел не заполнен —_', '')
+    }
+    lines.push('---', '')
+  }
+  return lines.join('\n')
+}
+
+// Отчёт по договору ТЗ: документ (summary_md) + Приложение (месячный отчёт как есть).
+function renderContractMarkdown(report: ReportRow, appendixMd: string): string {
+  const doc = report.summary_md?.trim() || '*— документ не сформирован —*'
+  const lines: string[] = [doc, '']
+  if (appendixMd.trim()) {
+    lines.push('', '---', '', '# ПРИЛОЖЕНИЕ', '', appendixMd.trim(), '')
+  }
+  return lines.join('\n')
 }

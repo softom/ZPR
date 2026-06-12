@@ -60,6 +60,7 @@ export type ControlSection = {
   narrative: string | null
   contract_summary: string | null
   decisions: string | null
+  next_period_tasks: string | null
   priority_group: 'priority' | 'secondary' | null
   tep_deadline: string | null
   generated_at: string
@@ -96,12 +97,13 @@ export type ControlContractStage = {
   status: 'done' | 'current' | 'upcoming'
 }
 
-type ControlFieldKey = 'narrative' | 'contract_summary' | 'decisions'
+type ControlFieldKey = 'narrative' | 'contract_summary' | 'decisions' | 'next_period_tasks'
 
 const CONTROL_FIELDS: Array<{ key: ControlFieldKey; title: string; hint: string }> = [
-  { key: 'narrative',        title: '1. Нарратив',                 hint: 'Сжатый сухой текст: 1 абзац, 4-6 предложений. Состояние, ключевые недавние решения, изменения ФЗ, ближайшие контрольные точки. Без дублирования сводки.' },
+  { key: 'narrative',        title: '1. Работы отчётного периода',   hint: 'Что сделано по объекту за последнюю неделю (7 дней до даты справки): свежие события, закрытые задачи, решённые проблемы. Сухо, 1 абзац.' },
   { key: 'contract_summary', title: '2. Этапы договора со сроками', hint: 'Список этапов (Массинг / ОПР / МОП) с фактическими и плановыми датами.' },
-  { key: 'decisions',        title: '3. Ключевые решения и поручения', hint: 'Что решено, кому поручено, к какому сроку.' },
+  { key: 'decisions',        title: '3. Общее состояние работ',       hint: 'Интегральная картина СОСТОЯНИЯ объекта: что завершено/получено/решено, положение по договору и сроку ТЭП. Без задач и планов. Сухо, 1 абзац.' },
+  { key: 'next_period_tasks', title: '4. Текущие задачи и планы',     hint: 'Что в работе (задачи имеют срок исполнения), ближайшие контрольные точки, идущие/планируемые тендеры и работы. Сухо, 1 абзац.' },
 ]
 
 function formatDate(iso: string | null): string {
@@ -784,8 +786,9 @@ function ControlSectionCard({
 
       {s.generated_at && (
         <p className="text-xs text-gray-400 mt-3 pt-3 border-t">
-          Последняя генерация: {new Date(s.generated_at).toLocaleString('ru-RU')}
-          {s.model_used && ` · ${s.model_used}`}
+          Последняя редакция раздела: {new Date(s.generated_at).toLocaleDateString('ru-RU', {
+            day: 'numeric', month: 'long', year: 'numeric',
+          })}
         </p>
       )}
     </article>

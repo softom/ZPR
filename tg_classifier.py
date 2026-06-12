@@ -843,15 +843,21 @@ def main():
     ap.add_argument("--layer", choices=["rule", "llm", "all"], default="all", help="Только rule / только llm / оба")
     ap.add_argument("--report", default=None, help="Путь к отчёту-файлу")
     ap.add_argument("--max-windows", type=int, default=None, help="Лимит L2-окон (для тестового прогона)")
+    ap.add_argument("--json-summary", action="store_true", help="Напечатать JSON-строку с итогами (для API)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
     sb = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)                    # локальный (канон ЗПР)
     sb_cloud = create_client(SUPABASE_CLOUD_URL, SUPABASE_CLOUD_SECRET_KEY,  # облако (реестр TG)
                              options=ClientOptions(postgrest_client_timeout=60))
+    t0 = time.time()
     msgs, linked_ids, t_l1, t_l2, obj_map, chat_titles, chat_to_contractor = load_data(sb, sb_cloud, args.days, args.object)
     if not msgs:
         print("Нет новых сообщений для классификации.")
+        if args.json_summary:
+            print("__JSON__" + json.dumps({"success": True, "classifier_new": 0,
+                  "classifier_merged": 0, "failed": 0, "candidates": 0,
+                  "messages_scanned": 0, "duration_seconds": round(time.time() - t0, 1)}))
         return
 
     print(f"Шаблоны: L1={len(t_l1)} L2={len(t_l2)}")
@@ -882,13 +888,26 @@ def main():
     if args.apply:
         if not candidates:
             print("Нет кандидатов — нечего записывать.")
+            if args.json_summary:
+                print("__JSON__" + json.dumps({"success": True, "classifier_new": 0,
+                      "classifier_merged": 0, "failed": 0, "candidates": 0,
+                      "messages_scanned": len(msgs), "duration_seconds": round(time.time() - t0, 1)}))
             return
         inserted, merged, failed, attached = write_to_db(sb, candidates, msgs)
         print(f"\nЗаписано в БД: {inserted} новых preliminary, {merged} слито с существующими "
               f"(failed: {failed}), прикреплено файлов: {attached}")
         print(f"Проверить: SELECT * FROM events WHERE is_preliminary=true ORDER BY created_at DESC LIMIT 20;")
+        if args.json_summary:
+            print("__JSON__" + json.dumps({"success": True, "classifier_new": inserted,
+                  "classifier_merged": merged, "failed": failed, "attached": attached,
+                  "candidates": len(candidates), "messages_scanned": len(msgs),
+                  "duration_seconds": round(time.time() - t0, 1)}))
     else:
         print(f"\nDRY-RUN: {len(candidates)} кандидатов не записаны. Запусти с --apply чтобы создать preliminary events.")
+        if args.json_summary:
+            print("__JSON__" + json.dumps({"success": True, "classifier_new": 0,
+                  "classifier_merged": 0, "candidates": len(candidates),
+                  "messages_scanned": len(msgs), "duration_seconds": round(time.time() - t0, 1)}))
 
 
 if __name__ == "__main__":

@@ -189,6 +189,13 @@ input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px
 /* ── access toolbar ── */
 .access-toolbar { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
 .access-toolbar .btn-primary { margin-left: auto; }
+.input-filter {
+  padding: 0.3rem 0.7rem; font-size: 13px; border: 1px solid var(--border);
+  border-radius: var(--radius); width: 250px; max-width: none;
+}
+.filter-stats {
+  font-size: 13px; color: var(--text-2); margin-bottom: 0.5rem; padding: 0.25rem 0;
+}
 
 /* ── checkboxes ── */
 input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }

@@ -7,6 +7,8 @@ import dynamic from 'next/dynamic'
 import { formatPeriodPhrase } from '@/lib/reports/periodHelpers'
 import { formatScopeLabel } from '@/lib/reports/scopeLabel'
 import ControlReportView, { type ControlReport, type ControlSection, ObjectTitle, StaleHintWarning } from './ControlReportView'
+import ShortReportView, { type ShortReport, type ShortSection } from './ShortReportView'
+import ContractReportView, { type ContractReport } from './ContractReportView'
 import { type MapGeoData, getObjectAreaM2 } from './ObjectSchema'
 import ObjectCover from './ObjectCover'
 import '@uiw/react-md-editor/markdown-editor.css'
@@ -65,7 +67,7 @@ function AutoGrowTextarea({
 
 type Report = {
   id: string
-  period_type: 'week' | 'month' | 'control'
+  period_type: 'week' | 'month' | 'control' | 'short' | 'contract'
   period_start: string
   period_end: string
   title: string | null
@@ -500,6 +502,27 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       <ControlReportView
         report={report as unknown as ControlReport}
         sections={sections as unknown as ControlSection[]}
+        reload={load}
+      />
+    )
+  }
+
+  // короткая справка (утверждённые варианты) — отдельный компонент
+  if (report.period_type === 'short') {
+    return (
+      <ShortReportView
+        report={report as unknown as ShortReport}
+        sections={sections as unknown as ShortSection[]}
+        reload={load}
+      />
+    )
+  }
+
+  // отчёт по договору ТЗ (проектного уровня) — отдельный компонент
+  if (report.period_type === 'contract') {
+    return (
+      <ContractReportView
+        report={report as unknown as ContractReport}
         reload={load}
       />
     )
@@ -1039,9 +1062,8 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
               {s.generated_at && (
                 <p className="text-xs text-gray-400 mt-3 pt-3 border-t">
-                  Дата формирования раздела и последних правок: {new Date(s.generated_at).toLocaleString('ru-RU', {
-                    day: '2-digit', month: '2-digit', year: 'numeric',
-                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                  Последняя редакция раздела: {new Date(s.generated_at).toLocaleDateString('ru-RU', {
+                    day: 'numeric', month: 'long', year: 'numeric',
                   })}
                 </p>
               )}

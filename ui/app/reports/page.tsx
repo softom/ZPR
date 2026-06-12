@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation'
 
 type ReportRow = {
   id: string
-  period_type: 'week' | 'month' | 'control'
+  period_type: 'week' | 'month' | 'control' | 'short' | 'contract'
   period_start: string
   period_end: string
   title: string | null
@@ -31,6 +31,8 @@ const TYPE_LABEL: Record<string, string> = {
   week: 'Неделя',
   month: 'Месяц',
   control: 'Справка ТЗ',
+  short: 'Короткая справка',
+  contract: 'Отчёт по договору',
 }
 
 function formatDate(iso: string | null): string {
@@ -60,12 +62,12 @@ export default function ReportsPage() {
   const [reports, setReports] = useState<ReportRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [filterType, setFilterType] = useState<'' | 'week' | 'month' | 'control'>('')
+  const [filterType, setFilterType] = useState<'' | 'week' | 'month' | 'control' | 'short' | 'contract'>('')
   const [filterStatus, setFilterStatus] = useState<'' | 'draft' | 'final'>('')
 
   // Модал создания
   const [creating, setCreating] = useState(false)
-  const [newType, setNewType] = useState<'week' | 'month' | 'control'>('week')
+  const [newType, setNewType] = useState<'week' | 'month' | 'control' | 'short' | 'contract'>('week')
   const [newStart, setNewStart] = useState(thisMonday())
   const [submitting, setSubmitting] = useState(false)
   const [createError, setCreateError] = useState('')
@@ -102,11 +104,11 @@ export default function ReportsPage() {
     return d.toISOString().slice(0, 10)
   }
 
-  function changeType(t: 'week' | 'month' | 'control') {
+  function changeType(t: 'week' | 'month' | 'control' | 'short' | 'contract') {
     setNewType(t)
     if (t === 'week') setNewStart(thisMonday())
-    else if (t === 'month') setNewStart(thisMonthFirst())
-    else setNewStart(todayISO())
+    else if (t === 'month' || t === 'contract') setNewStart(thisMonthFirst())
+    else setNewStart(todayISO())   // control / short — снимок на дату
   }
 
   async function submitCreate() {
@@ -176,13 +178,15 @@ export default function ReportsPage() {
       <div className="flex gap-2 mb-4">
         <select
           value={filterType}
-          onChange={(e) => setFilterType(e.target.value as '' | 'week' | 'month' | 'control')}
+          onChange={(e) => setFilterType(e.target.value as '' | 'week' | 'month' | 'control' | 'short' | 'contract')}
           className="px-3 py-1.5 border rounded text-sm"
         >
           <option value="">Все типы</option>
           <option value="week">Только недельные</option>
           <option value="month">Только месячные</option>
           <option value="control">Только Справки ТЗ</option>
+          <option value="short">Только Короткие справки</option>
+          <option value="contract">Только по договору</option>
         </select>
         <select
           value={filterStatus}
@@ -259,7 +263,7 @@ export default function ReportsPage() {
             <div className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Тип отчёта *</label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => changeType('week')}
                     className={`px-2 py-2 text-xs rounded border ${
@@ -284,6 +288,22 @@ export default function ReportsPage() {
                   >
                     📋 Справка ТЗ<br /><span className="text-[10px] opacity-80">для руководства</span>
                   </button>
+                  <button
+                    onClick={() => changeType('short')}
+                    className={`px-2 py-2 text-xs rounded border ${
+                      newType === 'short' ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-gray-700 border-gray-300'
+                    }`}
+                  >
+                    ✅ Короткая справка<br /><span className="text-[10px] opacity-80">утв. варианты</span>
+                  </button>
+                  <button
+                    onClick={() => changeType('contract')}
+                    className={`px-2 py-2 text-xs rounded border ${
+                      newType === 'contract' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300'
+                    }`}
+                  >
+                    📑 По договору<br /><span className="text-[10px] opacity-80">услуги ИП по Заданию</span>
+                  </button>
                 </div>
                 {newType === 'control' && (
                   <p className="text-xs text-purple-700 bg-purple-50 border border-purple-200 rounded p-2 mt-2">
@@ -291,11 +311,24 @@ export default function ReportsPage() {
                     На каждом объекте — нарратив, этапы договоров и ключевые решения.
                   </p>
                 )}
+                {newType === 'short' && (
+                  <p className="text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded p-2 mt-2">
+                    Короткая справка: какие варианты заказчик утвердил в дальнейшую работу
+                    (накопительно на дату). По каждому объекту — вступление + список утверждений.
+                  </p>
+                )}
+                {newType === 'contract' && (
+                  <p className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded p-2 mt-2">
+                    Отчёт о проделанной работе по договору ТЗ (услуги ИП): по пунктам Задания,
+                    рамка «Исполнитель организовал…». Собирается из месячного отчёта ЗПР, который
+                    выбирается внутри как Приложение.
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">
                   {newType === 'week' ? 'Понедельник недели *'
-                    : newType === 'month' ? 'Любая дата месяца *'
+                    : (newType === 'month' || newType === 'contract') ? 'Любая дата месяца *'
                     : 'Дата формирования справки *'}
                 </label>
                 <input
@@ -308,6 +341,8 @@ export default function ReportsPage() {
                   {newType === 'week' && 'Дата автоматически снэпится к понедельнику.'}
                   {newType === 'month' && 'Дата автоматически снэпится к 1-му числу месяца.'}
                   {newType === 'control' && 'Снимок состояния проекта на выбранную дату.'}
+                  {newType === 'short' && 'Накопительно: все варианты, утверждённые до выбранной даты.'}
+                  {newType === 'contract' && 'Месяц, за который формируется отчёт по договору (дата снэпится к 1-му числу).'}
                 </p>
               </div>
               {createError && <p className="text-sm text-red-600">{createError}</p>}

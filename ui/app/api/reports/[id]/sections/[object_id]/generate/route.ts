@@ -4,6 +4,8 @@ import { buildContext } from '@/lib/reports/buildContext'
 import { buildControlContext } from '@/lib/reports/buildControlContext'
 import { generateSections, REPORT_FIELDS, type ReportField } from '@/lib/reports/generateSection'
 import { generateControlSections, CONTROL_FIELDS, type ControlField } from '@/lib/reports/generateControlSection'
+import { buildShortContext } from '@/lib/reports/buildShortContext'
+import { generateShortSections, SHORT_FIELDS, type ShortField } from '@/lib/reports/generateShortSection'
 
 export const maxDuration = 120
 
@@ -27,13 +29,15 @@ export async function POST(
     return NextResponse.json({ error: 'Финализированный отчёт нельзя пересобрать' }, { status: 409 })
   }
 
-  const periodType = r.data.period_type as 'week' | 'month' | 'control'
+  const periodType = r.data.period_type as 'week' | 'month' | 'control' | 'short'
   const periodStart = new Date(r.data.period_start)
   const periodEndDate = new Date(r.data.period_end)
 
   // Парсим fields (валидный набор зависит от типа отчёта)
   const allowedFields = periodType === 'control'
     ? (CONTROL_FIELDS as readonly string[])
+    : periodType === 'short'
+    ? (SHORT_FIELDS as readonly string[])
     : (REPORT_FIELDS as readonly string[])
 
   let requestedFields: string[] | undefined
@@ -97,6 +101,47 @@ export async function POST(
     update.generated_at = new Date().toISOString()
     update.model_used = process.env.LLM_MODEL ?? 'anthropic/claude-sonnet-4.6'
 
+    const { data, error } = await supabaseAdmin
+      .from('object_reports')
+      .update(update)
+      .eq('report_id', id)
+      .eq('object_id', object_id)
+      .select('*')
+      .single()
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ section: data })
+  }
+
+  // === short ветка (Короткая справка: утверждённые варианты «в работу») ===
+  if (periodType === 'short') {
+    let ctxData
+    try {
+      ctxData = await buildShortContext(object_id, periodStart)
+    } catch (e) {
+      return NextResponse.json({ error: `Контекст: ${(e as Error).message}` }, { status: 500 })
+    }
+    let sections
+    try {
+      sections = await generateShortSections(ctxData, requestedFields as ShortField[] | undefined)
+    } catch (e) {
+      return NextResponse.json({ error: `LLM: ${(e as Error).message}` }, { status: 500 })
+    }
+    const update: Record<string, string> = {}
+    let nonEmptyCount = 0
+    for (const f of (requestedFields ?? SHORT_FIELDS) as ShortField[]) {
+      if (!(f in sections)) continue
+      const v = sections[f] ?? ''
+      if (v.trim().length === 0) continue
+      update[f] = v
+      nonEmptyCount += 1
+    }
+    if (nonEmptyCount === 0) {
+      return NextResponse.json({
+        error: 'LLM вернул пустые значения. Возможно, по объекту нет утверждённых вариантов в источниках (собрания/события).',
+      }, { status: 422 })
+    }
+    update.generated_at = new Date().toISOString()
+    update.model_used = process.env.LLM_MODEL ?? 'anthropic/claude-sonnet-4.6'
     const { data, error } = await supabaseAdmin
       .from('object_reports')
       .update(update)

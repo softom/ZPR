@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     .select('id, period_type, period_start, period_end, title, status, created_at, finalized_at')
     .order('period_start', { ascending: false })
 
-  if (periodType === 'week' || periodType === 'month' || periodType === 'control') {
+  if (periodType === 'week' || periodType === 'month' || periodType === 'control' || periodType === 'short' || periodType === 'contract') {
     q = q.eq('period_type', periodType)
   }
   if (status === 'draft' || status === 'final') q = q.eq('status', status)
@@ -43,12 +43,17 @@ export async function GET(request: NextRequest) {
     }>) {
       const c = countsByReport.get(s.report_id) ?? { total: 0, filled: 0 }
       c.total += 1
-      const isControl = typeByReport.get(s.report_id) === 'control'
+      const rtype = typeByReport.get(s.report_id)
       let filled: number
-      if (isControl) {
-        filled = [s.narrative, s.contract_summary, s.decisions]
+      if (rtype === 'short') {
+        // Короткая справка: вступление (narrative) + список вариантов (decisions)
+        filled = [s.narrative, s.decisions]
           .filter((x) => x && x.trim().length > 0).length
-        if (filled === 3) c.filled += 1
+        if (filled === 2) c.filled += 1
+      } else if (rtype === 'control') {
+        filled = [s.narrative, s.contract_summary, s.decisions, s.next_period_tasks]
+          .filter((x) => x && x.trim().length > 0).length
+        if (filled === 4) c.filled += 1
       } else {
         filled = [s.project_movement, s.achievements, s.next_period_tasks, s.risks]
           .filter((x) => x && x.trim().length > 0).length
@@ -78,8 +83,8 @@ export async function POST(request: NextRequest) {
   }
 
   const periodType = body.period_type as PeriodType
-  if (periodType !== 'week' && periodType !== 'month' && periodType !== 'control') {
-    return NextResponse.json({ error: 'period_type должен быть week|month|control' }, { status: 400 })
+  if (periodType !== 'week' && periodType !== 'month' && periodType !== 'control' && periodType !== 'short' && periodType !== 'contract') {
+    return NextResponse.json({ error: 'period_type должен быть week|month|control|short|contract' }, { status: 400 })
   }
   if (!body.period_start) {
     return NextResponse.json({ error: 'period_start обязателен (YYYY-MM-DD)' }, { status: 400 })
@@ -117,8 +122,9 @@ export async function POST(request: NextRequest) {
     .order('code', { ascending: true })
   if (oErr) return NextResponse.json({ error: oErr.message }, { status: 500 })
 
-  // Создаём пустые object_reports
-  const sectionsToInsert = (objects ?? []).map((o) => ({
+  // Создаём пустые object_reports (кроме 'contract' — он проектного уровня,
+  // содержание лежит в reports.summary_md, секций по объектам нет).
+  const sectionsToInsert = periodType === 'contract' ? [] : (objects ?? []).map((o) => ({
     report_id: report.id,
     object_id: o.id,
     period_start: report.period_start,

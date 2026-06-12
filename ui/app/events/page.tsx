@@ -1451,7 +1451,7 @@ function EventsPageInner() {
               onClick={async () => {
                 if (refreshing) return
                 setRefreshing(true)
-                setRefreshMsg('Догоняю TG: backfill → классификатор…')
+                setRefreshMsg('⏳ Классификация TG-сообщений…')
                 try {
                   const res = await fetch('/api/events/refresh-tg', {
                     method: 'POST',
@@ -1461,8 +1461,9 @@ function EventsPageInner() {
                   const data = await res.json()
                   if (data.success) {
                     setRefreshMsg(
-                      `✓ Догон: +${data.backfill_new} сообщ., ${data.classifier_new} preliminary ` +
-                      `(${data.classifier_merged} слито), ${data.duration_seconds}c`
+                      `✓ +${data.classifier_new} preliminary` +
+                      (data.classifier_merged ? ` (${data.classifier_merged} слито)` : '') +
+                      `, ${data.messages_scanned ?? '?'} сообщ. проверено, ${data.duration_seconds}c`
                     )
                     await load()  // перечитать events + prelimCount
                   } else {
@@ -1477,10 +1478,19 @@ function EventsPageInner() {
               }}
               disabled={refreshing}
               className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-sky-100 text-sky-800 hover:bg-sky-200 disabled:opacity-50"
-              title="Stop listener → backfill 3 дня → tg_classifier --apply → start listener. Занимает 1-3 минуты."
+              title="Классификатор TG: rule-based анализ сообщений за 3 дня → создание preliminary событий. ~1-5 сек."
             >
               {refreshing ? '⏳ Догоняю…' : '↻ Считать из TG'}
             </button>
+            <a
+              href="http://95.181.173.95:8080"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 hover:bg-indigo-200 text-xs"
+              title="Web-админка TG-листенера: дашборд, клиенты, доступ к чатам"
+            >
+              💬 TG Admin
+            </a>
             {refreshMsg && (
               <span className={`text-xs ${refreshMsg.startsWith('✓') ? 'text-emerald-700' : refreshMsg.startsWith('✗') ? 'text-red-700' : 'text-gray-600'}`}>
                 {refreshMsg}

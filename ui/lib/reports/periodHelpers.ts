@@ -2,7 +2,7 @@
 // week  = пн-вс, 7 дней. period_start = понедельник, period_end = воскресенье.
 // month = 1-е по последнее число календарного месяца.
 
-export type PeriodType = 'week' | 'month' | 'control'
+export type PeriodType = 'week' | 'month' | 'control' | 'short' | 'contract'
 
 // Снэп даты к началу периода: пн (для week), 1-е число (month) или сама дата (control).
 export function snapToPeriodStart(date: Date | string, periodType: PeriodType): Date {
@@ -14,11 +14,11 @@ export function snapToPeriodStart(date: Date | string, periodType: PeriodType): 
     d.setDate(d.getDate() - (day - 1))
     return d
   }
-  if (periodType === 'month') {
+  if (periodType === 'month' || periodType === 'contract') {
     d.setDate(1)
     return d
   }
-  // control: snapshot — period_start = сама дата (без снапа)
+  // control/short: snapshot — period_start = сама дата (без снапа)
   return d
 }
 
@@ -31,13 +31,13 @@ export function periodEnd(start: Date | string, periodType: PeriodType): Date {
     d.setDate(d.getDate() + 6)
     return d
   }
-  if (periodType === 'month') {
+  if (periodType === 'month' || periodType === 'contract') {
     const next = new Date(d)
     next.setMonth(next.getMonth() + 1, 1)
     next.setDate(0)
     return next
   }
-  // control: end = start
+  // control/short: end = start
   return d
 }
 
@@ -74,6 +74,15 @@ export function formatPeriodTitle(start: Date, end: Date, periodType: PeriodType
     const monthName = start.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })
     return monthName.charAt(0).toUpperCase() + monthName.slice(1)
   }
+  if (periodType === 'short') {
+    // short: "Короткая справка на 14 мая 2026"
+    return `Короткая справка на ${fmt(start)}`
+  }
+  if (periodType === 'contract') {
+    // contract: "Отчёт по договору — Май 2026"
+    const m = start.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })
+    return `Отчёт по договору — ${m.charAt(0).toUpperCase() + m.slice(1)}`
+  }
   // control: "Справка ТЗ на 14 мая 2026"
   return `Справка ТЗ на ${fmt(start)}`
 }
@@ -82,6 +91,8 @@ export function formatPeriodTitle(start: Date, end: Date, periodType: PeriodType
 export function periodKindWord(periodType: PeriodType): string {
   if (periodType === 'week') return 'еженедельный'
   if (periodType === 'month') return 'ежемесячный'
+  if (periodType === 'short') return 'короткая справка'
+  if (periodType === 'contract') return 'по договору'
   // control: используется как «Справка ТЗ» — отдельный кейс в рендере
   return 'справка ТЗ'
 }
@@ -101,12 +112,12 @@ const MONTHS_NOMINATIVE = [
 ]
 
 export function formatPeriodPhrase(start: Date, end: Date, periodType: PeriodType): string {
-  if (periodType === 'month') {
+  if (periodType === 'month' || periodType === 'contract') {
     const m = MONTHS_NOMINATIVE[start.getMonth()]
     return `${m} ${start.getFullYear()} года`
   }
-  if (periodType === 'control') {
-    // control: snapshot — "на 14 мая 2026 года"
+  if (periodType === 'control' || periodType === 'short') {
+    // control/short: snapshot — "на 14 мая 2026 года"
     const sd = start.getDate()
     const sm = MONTHS_GENITIVE[start.getMonth()]
     const sy = start.getFullYear()
