@@ -18,9 +18,10 @@ export async function GET(request: NextRequest) {
   const url = new URL(request.url)
   const objectField = url.searchParams.get('objectField') ?? 'Text1'
   const projectName = url.searchParams.get('projectName') ?? 'ZPR_Schedule'
+  const versionId = url.searchParams.get('versionId') ?? null
 
   try {
-    const xml = await exportMspdiXml({ objectField, projectName })
+    const xml = await exportMspdiXml({ objectField, projectName, versionId })
     const date = new Date().toISOString().slice(0, 10)
     const fileName = `ZPR_Schedule_${date}.xml`
     return new NextResponse(xml, {

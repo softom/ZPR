@@ -36,6 +36,7 @@ export async function POST(request: NextRequest) {
 
   const objectField = (formData.get('objectField') as string | null) ?? 'Notes'
   const notes = (formData.get('notes') as string | null) ?? null
+  const versionName = (formData.get('versionName') as string | null) ?? null
   const modeRaw = (formData.get('mode') as string | null) ?? 'replace'
   const mode: 'replace' | 'metadata-only' = modeRaw === 'metadata-only' ? 'metadata-only' : 'replace'
 
@@ -53,7 +54,7 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  console.log(`[schedule/import] file=${file.name} size=${file.size} objectField=${objectField} mode=${mode}`)
+  console.log(`[schedule/import] file=${file.name} size=${file.size} objectField=${objectField} mode=${mode} versionName=${versionName ?? '—'}`)
 
   try {
     const result = await importMspdiXml({
@@ -62,6 +63,7 @@ export async function POST(request: NextRequest) {
       fileSize: file.size,
       objectField,
       notes,
+      versionName,
       mode,
     })
     console.log(

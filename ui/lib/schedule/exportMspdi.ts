@@ -16,12 +16,18 @@ import { supabaseAdmin } from '../supabase-admin'
 export interface ExportOptions {
   /**
    * Имя поля для записи кода объекта в задачу. Если не указано —
-   * берётся `object_field` из последнего schedule_imports (round-trip).
+   * берётся `object_field` из версии (round-trip).
    * Если истории нет — fallback на 'Text1'.
    */
   objectField?: string
   /** Имя проекта в MSPDI (для шапки). */
   projectName?: string
+  /**
+   * ID версии (schedule_imports.id). Если указан — экспортируется конкретная версия.
+   * Если не указан — берётся активная версия (is_active=true).
+   * Если нет активной — экспортируются все строки (legacy-режим).
+   */
+  versionId?: string | null
 }
 
 interface ImportMetaRow {
@@ -78,14 +84,39 @@ interface ObjectRow {
 }
 
 export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> {
-  // Берём метаданные последнего импорта для round-trip (object_field, FieldID, декларации, даты проекта)
-  const { data: lastImport } = await supabaseAdmin
-    .from('schedule_imports')
-    .select('object_field, object_field_id, extended_attribute_defs, project_start_date, project_finish_date, project_name, project_calendar_settings')
-    .order('imported_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  const importMeta = (lastImport ?? null) as ImportMetaRow | null
+  // Определяем версию для экспорта
+  let targetVersionId: string | null = opts.versionId ?? null
+
+  if (!targetVersionId) {
+    // Берём активную версию
+    const { data: activeImp } = await supabaseAdmin
+      .from('schedule_imports')
+      .select('id')
+      .eq('is_active', true)
+      .maybeSingle()
+    targetVersionId = activeImp?.id ?? null
+  }
+
+  // Метаданные версии для round-trip (object_field, FieldID, декларации, даты проекта)
+  let importMeta: ImportMetaRow | null = null
+  if (targetVersionId) {
+    const { data } = await supabaseAdmin
+      .from('schedule_imports')
+      .select('object_field, object_field_id, extended_attribute_defs, project_start_date, project_finish_date, project_name, project_calendar_settings')
+      .eq('id', targetVersionId)
+      .maybeSingle()
+    importMeta = (data ?? null) as ImportMetaRow | null
+  }
+  if (!importMeta) {
+    // legacy-режим: берём последний импорт
+    const { data } = await supabaseAdmin
+      .from('schedule_imports')
+      .select('object_field, object_field_id, extended_attribute_defs, project_start_date, project_finish_date, project_name, project_calendar_settings')
+      .order('imported_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    importMeta = (data ?? null) as ImportMetaRow | null
+  }
 
   const objectField = opts.objectField ?? importMeta?.object_field ?? 'Text1'
   const projectName = opts.projectName ?? 'ZPR_Schedule'
@@ -101,17 +132,23 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
     return def?.fieldId ?? null
   })()
 
-  // 1. Загружаем calendar_entries (только записи, относящиеся к "графику" — entry_type начинается с schedule_*
-  //    или у строки есть mspdi_uid, или is_project_wide). Договорные fin_*/work_* не выгружаем — они живут
-  //    отдельной жизнью).
-  const { data: entries, error: entriesErr } = await supabaseAdmin
+  // 1. Загружаем calendar_entries для указанной версии (или все если версии нет — legacy).
+  let entriesQuery = supabaseAdmin
     .from('calendar_entries')
     .select(
       `id, mspdi_uid, mspdi_id, title, outline_level, outline_number, parent_entry_id,
        is_summary, is_project_wide, task_mode, date_start, date_end, percent_complete,
        mspdi_notes, mspdi_duration, schedule_raw_text, object_ids, entry_type`,
     )
-    .or('mspdi_uid.not.is.null,entry_type.like.schedule_%')
+
+  if (targetVersionId) {
+    entriesQuery = entriesQuery.eq('schedule_version_id', targetVersionId)
+  } else {
+    // legacy: все schedule-записи (без фильтра по версии)
+    entriesQuery = entriesQuery.or('mspdi_uid.not.is.null,entry_type.like.schedule_%')
+  }
+
+  const { data: entries, error: entriesErr } = await entriesQuery
   if (entriesErr) throw new Error(`calendar_entries select failed: ${entriesErr.message}`)
 
   const rows = (entries ?? []) as CalendarEntryRow[]

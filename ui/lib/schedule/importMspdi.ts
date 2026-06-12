@@ -25,16 +25,17 @@ export interface ImportInput {
   objectField?: string
   importedByEmail?: string | null
   notes?: string | null
+  /** Название версии, заданное пользователем: «v014 — апрель», «Базовый план» и т.д. */
+  versionName?: string | null
   /**
    * Режим импорта:
-   *   - 'replace'       — полная замена (default). Все поля задачи перезаписываются,
-   *                       привязки к объектам пересчитываются по mapping, title очищается.
-   *                       Подходит для первой загрузки или когда правок в БД нет.
+   *   - 'replace'       — создаёт новую изолированную версию (default). Все задачи
+   *                       вставляются как новые строки с schedule_version_id = importId.
+   *                       Старые версии не затрагиваются.
    *   - 'metadata-only' — обновляются только MSPDI-метаданные (mspdi_duration, mspdi_id,
    *                       outline_*, parent_entry_id, is_summary, task_mode, mspdi_notes,
-   *                       predecessors). НЕ трогаются: title, date_start/end, object_ids,
-   *                       is_project_wide, percent_complete, entity_links, schedule_raw_text.
-   *                       Используется для пополнения новых полей в БД без потери ручных правок.
+   *                       predecessors) в активной версии. НЕ трогаются: title, date_start/end,
+   *                       object_ids, is_project_wide, percent_complete, entity_links, schedule_raw_text.
    */
   mode?: 'replace' | 'metadata-only'
 }
@@ -234,6 +235,13 @@ export async function importMspdiXml(input: ImportInput): Promise<ImportResult> 
     alias: d.alias,
   }))
 
+  // Первый активный импорт становится активной версией автоматически
+  const { count: activeCount } = await supabaseAdmin
+    .from('schedule_imports')
+    .select('id', { count: 'exact', head: true })
+    .eq('is_active', true)
+  const isFirstActive = (activeCount ?? 0) === 0
+
   const { data: imp, error: impErr } = await supabaseAdmin
     .from('schedule_imports')
     .insert({
@@ -257,6 +265,9 @@ export async function importMspdiXml(input: ImportInput): Promise<ImportResult> 
       tasks_total: project.tasks.length,
       imported_by_email: input.importedByEmail ?? null,
       notes: input.notes ?? null,
+      version_name: input.versionName ?? null,
+      xml_content: (mode === 'replace') ? input.xml : null,
+      is_active: isFirstActive && mode === 'replace',
     })
     .select('id')
     .single()
@@ -285,7 +296,7 @@ async function runImport(
 ): Promise<ImportResult> {
   const unmapped: UnmappedRow[] = []
   const unknownRawTexts = new Set<string>()
-  const upsertRows = project.tasks.map((t) => {
+  const upsertRows: Array<Record<string, unknown>> = project.tasks.map((t) => {
     const resolved = resolveObjects(t, objectField, mapping)
     if (resolved.unmapped && resolved.rawText) {
       unmapped.push({ mspdiUid: t.uid, taskName: t.name, rawText: resolved.rawText })
@@ -328,78 +339,90 @@ async function runImport(
     }
   })
 
-  // 4. UPSERT calendar_entries по mspdi_uid
-  // Подсчитываем inserted/updated через сравнение с существующими (по mspdi_uid).
-  const incomingUids = upsertRows.map(r => r.mspdi_uid)
-  const incomingUidsSet = new Set(incomingUids)
-  const { data: existing, error: exErr } = await supabaseAdmin
-    .from('calendar_entries')
-    .select('id, mspdi_uid')
-    .in('mspdi_uid', incomingUids)
-  if (exErr) throw new Error(`calendar_entries select existing failed: ${exErr.message}`)
-  const existingUids = new Set((existing ?? []).map(r => r.mspdi_uid as number))
-  const tasksInserted = incomingUids.filter(u => !existingUids.has(u)).length
-  const tasksUpdated = incomingUids.length - tasksInserted
-
-  // 4b. ОСИРОТЕВШИЕ: были в БД (mspdi_uid IS NOT NULL), нет в новом XML
-  const { data: allMspdi } = await supabaseAdmin
-    .from('calendar_entries')
-    .select('id, mspdi_uid, title, date_start, date_end')
-    .not('mspdi_uid', 'is', null)
-  const orphaned: OrphanRow[] = []
-  for (const row of (allMspdi ?? [])) {
-    if (!incomingUidsSet.has(row.mspdi_uid as number)) {
-      orphaned.push({
-        id: row.id as string,
-        mspdiUid: row.mspdi_uid as number,
-        title: row.title as string | null,
-        dateStart: row.date_start as string | null,
-        dateEnd: row.date_end as string | null,
-      })
-    }
-  }
-
+  const incomingUids = upsertRows.map(r => r.mspdi_uid as number)
+  const orphaned: OrphanRow[] = []  // с версионностью осиротевших нет — старые версии остаются
   const BATCH = 200
+  let tasksInserted = 0
+  let tasksUpdated = 0
 
   if (mode === 'replace') {
-    // Делим upsert на батчи по 200 — supabase-js имеет лимиты на размер тела запроса
-    for (let i = 0; i < upsertRows.length; i += BATCH) {
-      const batch = upsertRows.slice(i, i + BATCH)
-      const { error: upErr } = await supabaseAdmin
+    // Каждый импорт — новая изолированная версия.
+    // INSERT (без ON CONFLICT) + schedule_version_id = importId.
+    const insertRows = upsertRows.map(r => ({ ...r, schedule_version_id: importId }))
+    for (let i = 0; i < insertRows.length; i += BATCH) {
+      const batch = insertRows.slice(i, i + BATCH)
+      const { error: insErr } = await supabaseAdmin
         .from('calendar_entries')
-        .upsert(batch, { onConflict: 'mspdi_uid' })
-      if (upErr) throw new Error(`calendar_entries upsert failed at batch ${i / BATCH}: ${upErr.message}`)
+        .insert(batch)
+      if (insErr) throw new Error(`calendar_entries insert failed at batch ${Math.floor(i / BATCH)}: ${insErr.message}`)
     }
+    tasksInserted = insertRows.length
+    tasksUpdated = 0
   } else {
-    // metadata-only: для существующих UPDATE по mspdi_uid; новые задачи (не было в БД) — пропускаем.
-    // INSERT-режим не годится — postgres всё равно прогоняет проверки NOT NULL до ON CONFLICT.
-    const existingSet = new Set(Array.from(existingUids))
+    // metadata-only: обновляем только метаданные в активной версии (или legacy-строках без версии).
+    const { data: activeImp } = await supabaseAdmin
+      .from('schedule_imports')
+      .select('id')
+      .eq('is_active', true)
+      .maybeSingle()
+    const activeVersionId = activeImp?.id ?? null
+
+    const { data: existing } = await supabaseAdmin
+      .from('calendar_entries')
+      .select('id, mspdi_uid')
+      .in('mspdi_uid', incomingUids)
+      .eq('schedule_version_id', activeVersionId ?? '00000000-0000-0000-0000-000000000000')
+    const existingUids = new Set((existing ?? []).map(r => r.mspdi_uid as number))
+
     let updatedCount = 0
     let skippedNew = 0
     for (const row of upsertRows) {
-      if (!existingSet.has(row.mspdi_uid)) { skippedNew++; continue }
-      const { mspdi_uid, ...patch } = row
-      const { error } = await supabaseAdmin
+      const uid = row.mspdi_uid as number
+      if (!existingUids.has(uid)) { skippedNew++; continue }
+      const { mspdi_uid: _uid, ...patch } = row
+      const q = supabaseAdmin
         .from('calendar_entries')
         .update(patch)
-        .eq('mspdi_uid', mspdi_uid)
-      if (error) console.warn(`[metadata-only] update mspdi_uid=${mspdi_uid}: ${error.message}`)
+        .eq('mspdi_uid', uid)
+      const { error } = activeVersionId
+        ? await q.eq('schedule_version_id', activeVersionId)
+        : await q.is('schedule_version_id', null)
+      if (error) console.warn(`[metadata-only] update mspdi_uid=${uid}: ${error.message}`)
       else updatedCount++
     }
     if (skippedNew > 0) {
-      console.warn(`[metadata-only] ${skippedNew} новых задач из XML не созданы (в этом режиме только UPDATE). Запустите 'replace' если нужно их добавить.`)
+      console.warn(`[metadata-only] ${skippedNew} задач из XML не обновлены (не найдены в активной версии).`)
     }
+    tasksUpdated = updatedCount
     console.log(`[metadata-only] updated ${updatedCount}`)
   }
 
-  // 5. После upsert — собираем mapping mspdi_uid → uuid
-  const { data: allRows, error: allErr } = await supabaseAdmin
-    .from('calendar_entries')
-    .select('id, mspdi_uid')
-    .in('mspdi_uid', incomingUids)
-  if (allErr) throw new Error(`calendar_entries select uuid map failed: ${allErr.message}`)
-  const uidToUuid = new Map<number, string>()
-  for (const r of (allRows ?? [])) uidToUuid.set(r.mspdi_uid as number, r.id as string)
+  // 5. После INSERT — собираем mapping mspdi_uid → uuid
+  let uidToUuid = new Map<number, string>()
+  if (mode === 'replace') {
+    // Выбираем только строки только что созданной версии
+    const { data: allRows, error: allErr } = await supabaseAdmin
+      .from('calendar_entries')
+      .select('id, mspdi_uid')
+      .eq('schedule_version_id', importId)
+    if (allErr) throw new Error(`calendar_entries select uuid map failed: ${allErr.message}`)
+    for (const r of (allRows ?? [])) uidToUuid.set(r.mspdi_uid as number, r.id as string)
+  } else {
+    // metadata-only: ищем по mspdi_uid (в активной версии)
+    const { data: activeImp } = await supabaseAdmin
+      .from('schedule_imports')
+      .select('id')
+      .eq('is_active', true)
+      .maybeSingle()
+    const q = supabaseAdmin
+      .from('calendar_entries')
+      .select('id, mspdi_uid')
+      .in('mspdi_uid', incomingUids)
+    const { data: allRows } = activeImp?.id
+      ? await q.eq('schedule_version_id', activeImp.id)
+      : await q.is('schedule_version_id', null)
+    for (const r of (allRows ?? [])) uidToUuid.set(r.mspdi_uid as number, r.id as string)
+  }
 
   // 6. UPDATE parent_entry_id
   for (const t of project.tasks) {
@@ -480,7 +503,7 @@ async function runImport(
     for (const row of upsertRows) {
       // object_ids есть только в режиме 'replace' (поле опущено в metadata-only)
       const objectIds = (row as { object_ids?: string[] }).object_ids ?? []
-      const calId = uidToUuid.get(row.mspdi_uid)
+      const calId = uidToUuid.get(row.mspdi_uid as number)
       if (!calId) continue
       for (const objId of objectIds) {
         linkRows.push({

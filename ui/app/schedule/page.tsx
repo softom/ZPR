@@ -44,6 +44,14 @@ type ImportRow = {
   imported_at: string
 }
 
+type VersionRow = ImportRow & {
+  version_name: string | null
+  is_active: boolean
+  has_xml: boolean
+  entry_count: number
+  imported_by_email: string | null
+}
+
 type UnmappedRow = { mspdiUid: number; taskName: string; rawText: string }
 type OrphanRow = { id: string; mspdiUid: number; title: string | null; dateStart: string | null; dateEnd: string | null }
 
@@ -84,18 +92,25 @@ export default function SchedulePage() {
   const [objects, setObjects] = useState<ObjectRef[]>([])
   const [mappings, setMappings] = useState<Mapping[]>([])
   const [imports, setImports] = useState<ImportRow[]>([])
+  const [versions, setVersions] = useState<VersionRow[]>([])
 
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const [lastImport, setLastImport] = useState<ImportResponse | null>(null)
   const [objectField, setObjectField] = useState('Notes')
   const [importNotes, setImportNotes] = useState('')
+  const [importVersionName, setImportVersionName] = useState('')
   const [importMode, setImportMode] = useState<'replace' | 'metadata-only'>('replace')
+
+  // Версии: inline-редактирование имён
+  const [editingVersionId, setEditingVersionId] = useState<string | null>(null)
+  const [editingVersionName, setEditingVersionName] = useState('')
 
   const [preview, setPreview] = useState<PreviewResponse | null>(null)
   const [previewing, setPreviewing] = useState(false)
 
-  const [exportField, setExportField] = useState<string>('')   // пусто = «как при импорте»
+  const [exportField, setExportField] = useState<string>('')        // пусто = «как при импорте»
+  const [exportVersionId, setExportVersionId] = useState<string>('')  // пусто = активная
 
   // Reset
   const [resetting, setResetting] = useState(false)
@@ -112,6 +127,7 @@ export default function SchedulePage() {
     void loadObjects()
     void loadMappings()
     void loadImports()
+    void loadVersions()
   }, [])
 
   async function loadObjects() {
@@ -130,6 +146,11 @@ export default function SchedulePage() {
   async function loadImports() {
     const r = await fetch('/api/schedule/imports').then(r => r.json())
     setImports(r.imports ?? [])
+  }
+
+  async function loadVersions() {
+    const r = await fetch('/api/schedule/versions').then(r => r.json())
+    setVersions(Array.isArray(r) ? r : [])
   }
 
   // ─── Превью полей при выборе файла ─────────────────────────────────────
@@ -176,6 +197,7 @@ export default function SchedulePage() {
     fd.append('objectField', objectField)
     fd.append('mode', importMode)
     if (importNotes.trim()) fd.append('notes', importNotes.trim())
+    if (importVersionName.trim()) fd.append('versionName', importVersionName.trim())
 
     try {
       const res = await fetch('/api/schedule/import', { method: 'POST', body: fd })
@@ -184,7 +206,9 @@ export default function SchedulePage() {
         setImportError(data.error ?? 'Ошибка импорта')
       } else {
         setLastImport(data as ImportResponse)
+        setImportVersionName('')
         await loadImports()
+        await loadVersions()
       }
     } catch (e) {
       setImportError(`Сеть: ${e}`)
@@ -197,6 +221,7 @@ export default function SchedulePage() {
   function handleExport() {
     const params = new URLSearchParams()
     if (exportField.trim()) params.set('objectField', exportField.trim())
+    if (exportVersionId.trim()) params.set('versionId', exportVersionId.trim())
     const url = `/api/schedule/export${params.size > 0 ? '?' + params.toString() : ''}`
     window.open(url, '_blank')
   }
@@ -261,6 +286,48 @@ export default function SchedulePage() {
     } finally {
       setDeletingOrphans(false)
     }
+  }
+
+  // ─── Управление версиями ──────────────────────────────────────────────
+  async function activateVersion(id: string) {
+    const res = await fetch(`/api/schedule/versions/${id}/activate`, { method: 'POST' })
+    if (!res.ok) {
+      const data = await res.json()
+      alert(data.error ?? 'Ошибка активации')
+      return
+    }
+    await loadVersions()
+  }
+
+  async function deleteVersion(v: VersionRow) {
+    if (!confirm(`Удалить версию «${v.version_name ?? v.file_name}»?\n\nВсе ${v.entry_count} задач этой версии будут удалены. Это необратимо.`)) return
+    const res = await fetch(`/api/schedule/versions/${v.id}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!res.ok) {
+      alert(data.error ?? 'Ошибка удаления')
+      return
+    }
+    await loadVersions()
+  }
+
+  async function saveVersionName(id: string) {
+    const res = await fetch(`/api/schedule/versions/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version_name: editingVersionName.trim() || null }),
+    })
+    if (!res.ok) {
+      const data = await res.json()
+      alert(data.error ?? 'Ошибка сохранения')
+      return
+    }
+    setEditingVersionId(null)
+    await loadVersions()
+  }
+
+  function exportVersion(v: VersionRow) {
+    const params = new URLSearchParams({ versionId: v.id })
+    window.open(`/api/schedule/export?${params.toString()}`, '_blank')
   }
 
   // ─── Reset (опасная зона) ──────────────────────────────────────────────
@@ -438,20 +505,29 @@ export default function SchedulePage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            <input
+              type="text"
+              value={importVersionName}
+              onChange={(e) => setImportVersionName(e.target.value)}
+              placeholder="Название версии (например: «v014 — апрель»)"
+              className="w-72 rounded border border-slate-300 px-2 py-1 text-sm"
+            />
+            <input
+              type="text"
+              value={importNotes}
+              onChange={(e) => setImportNotes(e.target.value)}
+              placeholder="Заметка (необязательно)"
+              className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
+            />
+          </div>
+          <div>
             <button
               onClick={handleImport}
               disabled={importing || !preview}
               className="rounded bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {importing ? 'Импортирую…' : importMode === 'metadata-only' ? 'Дозагрузить метаданные' : 'Загрузить'}
+              {importing ? 'Импортирую…' : importMode === 'metadata-only' ? 'Дозагрузить метаданные' : 'Загрузить как новую версию'}
             </button>
-            <input
-              type="text"
-              value={importNotes}
-              onChange={(e) => setImportNotes(e.target.value)}
-              placeholder="Заметка к импорту (необязательно)"
-              className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-            />
           </div>
         </div>
 
@@ -545,13 +621,29 @@ export default function SchedulePage() {
         <h2 className="mb-3 text-lg font-semibold">📤 Экспорт XML</h2>
         <div className="flex flex-wrap items-center gap-3">
           <label className="text-sm">
-            Имя поля для кода объекта:{' '}
+            Версия:{' '}
+            <select
+              value={exportVersionId}
+              onChange={(e) => setExportVersionId(e.target.value)}
+              className="rounded border border-slate-300 px-2 py-1 text-sm"
+            >
+              <option value="">— активная —</option>
+              {versions.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.version_name ?? v.file_name}
+                  {v.is_active ? ' ✓' : ''} · {new Date(v.imported_at).toLocaleDateString('ru-RU')}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm">
+            Поле объекта:{' '}
             <input
               type="text"
               value={exportField}
               onChange={(e) => setExportField(e.target.value)}
-              placeholder="(пусто = как при последнем импорте)"
-              className="w-64 rounded border border-slate-300 px-2 py-1 text-sm"
+              placeholder="(как при импорте)"
+              className="w-44 rounded border border-slate-300 px-2 py-1 text-sm"
             />
           </label>
           <button
@@ -562,9 +654,117 @@ export default function SchedulePage() {
           </button>
         </div>
         <p className="mt-2 text-xs text-slate-500">
-          По умолчанию пишем в то же поле, из которого читали при последнем импорте — это сохраняет round-trip с MS Project.
-          Открой результат: File → Open → выбери .xml.
+          Экспортирует выбранную (или активную) версию плана. Открой результат в MS Project: File → Open → выбери .xml.
         </p>
+      </section>
+
+      {/* ─── ВЕРСИИ ─────────────────────────────────────────── */}
+      <section className="rounded border border-slate-200 bg-white p-4">
+        <h2 className="mb-3 text-lg font-semibold">🗂 Версии плана</h2>
+        <p className="mb-3 text-xs text-slate-500">
+          Каждый импорт создаёт изолированную версию. <strong>Активная версия</strong> используется в /calendar и при экспорте по умолчанию.
+        </p>
+        {versions.length === 0 ? (
+          <p className="text-sm text-slate-500">Пока нет ни одного импорта.</p>
+        ) : (
+          <div className="space-y-2">
+            {versions.map((v) => (
+              <div
+                key={v.id}
+                className={`flex flex-wrap items-start gap-2 rounded border p-3 ${v.is_active ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200 bg-white'}`}
+              >
+                {/* Активная метка */}
+                {v.is_active && (
+                  <span className="shrink-0 rounded bg-emerald-500 px-2 py-0.5 text-xs font-semibold text-white">
+                    ✓ Активная
+                  </span>
+                )}
+
+                {/* Название (inline edit) */}
+                <div className="flex min-w-0 flex-1 flex-col">
+                  {editingVersionId === v.id ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        autoFocus
+                        type="text"
+                        value={editingVersionName}
+                        onChange={(e) => setEditingVersionName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void saveVersionName(v.id)
+                          if (e.key === 'Escape') setEditingVersionId(null)
+                        }}
+                        className="rounded border border-blue-300 px-2 py-0.5 text-sm font-medium"
+                      />
+                      <button
+                        onClick={() => void saveVersionName(v.id)}
+                        className="text-xs text-blue-600 hover:underline"
+                      >
+                        ✓ сохранить
+                      </button>
+                      <button
+                        onClick={() => setEditingVersionId(null)}
+                        className="text-xs text-slate-500 hover:underline"
+                      >
+                        отмена
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      className="text-left font-medium hover:text-blue-600"
+                      onClick={() => {
+                        setEditingVersionId(v.id)
+                        setEditingVersionName(v.version_name ?? '')
+                      }}
+                      title="Нажми, чтобы задать имя"
+                    >
+                      {v.version_name
+                        ? <span>{v.version_name}</span>
+                        : <span className="text-slate-400 italic">без названия — нажми чтобы задать</span>
+                      }
+                    </button>
+                  )}
+                  <div className="mt-0.5 text-xs text-slate-500">
+                    {new Date(v.imported_at).toLocaleString('ru-RU')} ·{' '}
+                    {v.file_name} ·{' '}
+                    {v.entry_count} задач ·{' '}
+                    {v.tasks_unmapped > 0 && (
+                      <span className="text-amber-600">нерешено: {v.tasks_unmapped} · </span>
+                    )}
+                    {v.has_xml ? '💾 XML сохранён' : '— XML не сохранён'}
+                    {v.notes && <span className="ml-1 text-slate-400">· {v.notes}</span>}
+                  </div>
+                </div>
+
+                {/* Кнопки */}
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {!v.is_active && (
+                    <button
+                      onClick={() => void activateVersion(v.id)}
+                      className="rounded border border-emerald-400 px-2 py-0.5 text-xs text-emerald-700 hover:bg-emerald-50"
+                    >
+                      Активировать
+                    </button>
+                  )}
+                  <button
+                    onClick={() => exportVersion(v)}
+                    className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-50"
+                    title="Скачать XML этой версии"
+                  >
+                    📤 XML
+                  </button>
+                  {!v.is_active && (
+                    <button
+                      onClick={() => void deleteVersion(v)}
+                      className="rounded border border-red-200 px-2 py-0.5 text-xs text-red-600 hover:bg-red-50"
+                    >
+                      🗑
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* ─── МАППИНГ ────────────────────────────────────────── */}
