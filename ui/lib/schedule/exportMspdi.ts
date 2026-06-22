@@ -11,6 +11,7 @@
  */
 
 import { serializeMspdi, type SerializeOptions, type SerializeTask } from './mspdiSerializer'
+import type { MspdiPassthroughField } from './mspdiTypes'
 import { supabaseAdmin } from '../supabase-admin'
 
 export interface ExportOptions {
@@ -62,11 +63,14 @@ interface CalendarEntryRow {
   task_mode: 'auto' | 'manual'
   date_start: string | null
   date_end: string | null
+  entry_type: string
   percent_complete: number | null
   mspdi_notes: string | null
   mspdi_duration: string | null
   schedule_raw_text: string | null
   object_ids: string[]
+  /** Round-trip passthrough (jsonb). null → UI-задача (шаблон), undefined в типе не используется. */
+  mspdi_passthrough: MspdiPassthroughField[] | null
 }
 
 interface PredecessorRow {
@@ -138,7 +142,7 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
     .select(
       `id, mspdi_uid, mspdi_id, title, outline_level, outline_number, parent_entry_id,
        is_summary, is_project_wide, task_mode, date_start, date_end, percent_complete,
-       mspdi_notes, mspdi_duration, schedule_raw_text, object_ids, entry_type`,
+       mspdi_notes, mspdi_duration, schedule_raw_text, object_ids, entry_type, mspdi_passthrough`,
     )
 
   if (targetVersionId) {
@@ -241,7 +245,8 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
   // унифицированный язык графика. Round-trip обеспечивается тем, что мы
   // ниже UPSERT-им маппинги «код объекта → тот же объект», так что повторный
   // импорт того же файла найдёт привязку.
-  const serTasks: SerializeTask[] = rows.map(r => {
+  // outline_level=0 — пустые строки-разделители MS Project, не экспортируем (ломают иерархию XML)
+  const serTasks: SerializeTask[] = rows.filter(r => r.outline_level !== 0 && r.outline_level !== null).map(r => {
     const codes = r.object_ids.map(id => objectMap.get(id)?.code).filter(Boolean) as string[]
     const objectText = (() => {
       if (r.is_project_wide) return 'ЗПР'
@@ -280,7 +285,9 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
       outlineNumber: r.outline_number,
       parentUid: r.parent_entry_id ? uuidToUid.get(r.parent_entry_id) ?? null : null,
       isSummary: r.is_summary,
-      isMilestone: r.date_start !== null && r.date_end !== null && r.date_start === r.date_end,
+      // Веха — по типу записи, НЕ по совпадению дат: 1-дневная задача тоже
+      // имеет date_start==date_end, но это не milestone (у неё своя длительность).
+      isMilestone: r.entry_type === 'schedule_milestone',
       manual: r.task_mode === 'manual',
       start: r.date_start,
       finish: r.date_end,
@@ -297,6 +304,8 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
           lagType: p.lag_type,
         }))
         .filter(p => p.predecessorUid > 0),
+      // Round-trip: массив → восстановить из оригинала; null → UI-задача (шаблон).
+      passthrough: Array.isArray(r.mspdi_passthrough) ? r.mspdi_passthrough : null,
     }
   })
 

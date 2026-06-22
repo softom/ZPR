@@ -10,9 +10,9 @@ export const runtime = 'nodejs'
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
-  const id = params.id
+  const { id } = await params
   let body: { version_name?: string; notes?: string }
   try {
     body = await request.json()
@@ -41,9 +41,9 @@ export async function PATCH(
 
 export async function DELETE(
   _request: NextRequest,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
-  const id = params.id
+  const { id } = await params
 
   // Запрещаем удалять активную версию
   const { data: imp } = await supabaseAdmin

@@ -112,6 +112,8 @@ function monthLabel(key: string): string {
   return `${months[parseInt(m) - 1]} ${y}`
 }
 
+type VersionRow = { id: string; version_name: string | null; notes: string | null; imported_at: string; is_active: boolean; entry_count: number }
+
 // ─── Главная страница ────────────────────────────────────────────────────
 export default function CalendarPage() {
   const [entries,  setEntries]  = useState<CalendarEntry[]>([])
@@ -121,6 +123,9 @@ export default function CalendarPage() {
   const [docLinks, setDocLinks] = useState<Map<string, string>>(new Map()) // calendar_id → document_id
   const [loading,  setLoading]  = useState(true)
   const [error,    setError]    = useState('')
+
+  const [versions,        setVersions]        = useState<VersionRow[]>([])
+  const [selectedVersion, setSelectedVersion] = useState<string>('') // '' = активная
 
   const [filterCategories, setFilterCategories] = useState<string[]>([])
   const [filterObjects,    setFilterObjects]    = useState<string[]>([])
@@ -134,13 +139,33 @@ export default function CalendarPage() {
     return { y: d.getFullYear(), m: d.getMonth() }
   })
 
-  useEffect(() => { load() }, [])
+  async function loadVersions(): Promise<VersionRow[]> {
+    const res = await fetch('/api/schedule/versions')
+    const vers: VersionRow[] = res.ok ? await res.json() : []
+    setVersions(vers)
+    return vers
+  }
 
-  async function load() {
+  useEffect(() => {
+    async function init() {
+      const vers = await loadVersions()
+      const active = vers.find(v => v.is_active)
+      const initId = active?.id ?? (vers[0]?.id ?? '')
+      setSelectedVersion(initId)
+      await load(initId)
+    }
+    init()
+  }, [])
+
+  async function load(versionId: string) {
     setLoading(true)
     setError('')
+    let entriesQuery = supabase.from('calendar_entries').select('*').order('date_computed', { ascending: true, nullsFirst: false })
+    if (versionId) {
+      entriesQuery = entriesQuery.eq('schedule_version_id', versionId)
+    }
     const [eRes, sRes, oRes, dRes, lRes] = await Promise.all([
-      supabase.from('calendar_entries').select('*').order('date_computed', { ascending: true, nullsFirst: false }),
+      entriesQuery,
       supabase.from('calendar_object_status').select('*'),
       supabase.from('objects').select('id,code,current_name,color,icon').eq('active', true),
       supabase.from('documents').select('id,title').eq('type', 'ДОГОВОРА').is('deleted_at', null),
@@ -157,6 +182,21 @@ export default function CalendarPage() {
     }
     setDocLinks(map)
     setLoading(false)
+  }
+
+  async function handleVersionChange(versionId: string) {
+    setSelectedVersion(versionId)
+    setLoading(true)
+    // Выбор версии в селекторе делает её активной (рабочей) — звезда переезжает,
+    // экспорт и просмотр идут из неё, F5 сохраняет выбор.
+    const res = await fetch(`/api/schedule/versions/${versionId}/activate`, { method: 'POST' })
+    if (!res.ok) {
+      setError('Не удалось активировать версию')
+      setLoading(false)
+      return
+    }
+    await loadVersions()       // обновляем флаги is_active (звезда)
+    await load(versionId)      // грузим данные выбранной версии
   }
 
   const statusByEntry = useMemo(() => {
@@ -237,16 +277,37 @@ export default function CalendarPage() {
               <span key={cat}> · <span className={`px-1.5 py-0.5 rounded text-xs ${CATEGORY_BADGE[cat] || 'bg-gray-100 text-gray-600'}`}>{CATEGORY_LABELS[cat] || cat}: {cnt}</span></span>
             ))}
           </div>
-          <div className="inline-flex gap-1">
+          <div className="inline-flex items-center gap-2">
+            {versions.length > 0 && (
+              <select
+                value={selectedVersion}
+                onChange={e => handleVersionChange(e.target.value)}
+                className="text-sm border rounded px-2 py-1.5 bg-white text-gray-700 max-w-[420px]"
+                title="Версия плана из MS Project"
+              >
+                {versions.map(v => {
+                  const dt = new Date(v.imported_at).toLocaleString('ru', {
+                    day: '2-digit', month: '2-digit', year: '2-digit',
+                    hour: '2-digit', minute: '2-digit',
+                  })
+                  const name = v.version_name?.trim() || v.notes?.trim() || '(без названия)'
+                  return (
+                    <option key={v.id} value={v.id}>
+                      {v.is_active ? '★ ' : ''}{name} · {dt} · {v.entry_count} задач
+                    </option>
+                  )
+                })}
+              </select>
+            )}
             <Link
               href="/schedule"
               className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
               title="Загрузить MS Project XML (MSPDI)"
             >📥 Импорт XML</Link>
             <a
-              href="/api/schedule/export"
+              href={`/api/schedule/export${selectedVersion ? `?versionId=${selectedVersion}` : ''}`}
               className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
-              title="Скачать актуальный график в MSPDI XML"
+              title="Скачать график в MSPDI XML"
             >📤 Экспорт XML</a>
           </div>
         </div>

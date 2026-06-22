@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase-admin'
 import { enrichEventsWithLifecycle, type EventRow } from '@/lib/reports/buildContext'
+import { formatPeriodTitle, type PeriodType } from '@/lib/reports/periodHelpers'
 
 // Этап договора в API-ответе с цветовым статусом.
 type ContractStageForUI = {
@@ -468,6 +469,20 @@ export async function GET(
     })
   }
 
+  // text_stale — секция сгенерирована LLM ДО последней смены периода отчёта,
+  // значит её текст мог устареть (статистика/срезы уже пересчитаны на новый
+  // период, а сохранённый текст — нет). Подсказка в UI «перегенерируйте».
+  {
+    const changedAt = (reportRes.data as { period_changed_at?: string | null }).period_changed_at ?? null
+    sections = sections.map((s) => {
+      const genAt = (s as { generated_at?: string | null }).generated_at ?? null
+      const text_stale = Boolean(
+        changedAt && genAt && new Date(genAt).getTime() < new Date(changedAt).getTime(),
+      )
+      return { ...s, text_stale }
+    })
+  }
+
   return NextResponse.json({ report: reportRes.data, sections })
 }
 
@@ -484,7 +499,11 @@ export async function PATCH(
     return NextResponse.json({ error: 'Невалидный JSON' }, { status: 400 })
   }
 
-  const cur = await supabaseAdmin.from('reports').select('status').eq('id', id).single()
+  const cur = await supabaseAdmin
+    .from('reports')
+    .select('status, period_type, period_start, period_end')
+    .eq('id', id)
+    .single()
   if (cur.error || !cur.data) return NextResponse.json({ error: 'Отчёт не найден' }, { status: 404 })
   if (cur.data.status === 'final') {
     return NextResponse.json({ error: 'Финализированный отчёт нельзя править' }, { status: 409 })
@@ -500,6 +519,44 @@ export async function PATCH(
   if ('include_financials' in body) {
     update.include_financials = Boolean(body.include_financials)
   }
+
+  // Правка диапазона отчёта — свободные даты (без снапа к пн-вс / 1-му числу).
+  // Меняем period_start и/или period_end; статистика и срезы пересчитываются
+  // на лету при следующем GET, ранее сгенерированные тексты не трогаются.
+  let periodChanged = false
+  let newStart = cur.data.period_start as string
+  let newEnd = cur.data.period_end as string
+  if ('period_start' in body || 'period_end' in body) {
+    const ISO_RE = /^\d{4}-\d{2}-\d{2}$/
+    if ('period_start' in body) {
+      const v = body.period_start
+      if (typeof v !== 'string' || !ISO_RE.test(v)) {
+        return NextResponse.json({ error: 'period_start должен быть в формате YYYY-MM-DD' }, { status: 400 })
+      }
+      newStart = v
+    }
+    if ('period_end' in body) {
+      const v = body.period_end
+      if (typeof v !== 'string' || !ISO_RE.test(v)) {
+        return NextResponse.json({ error: 'period_end должен быть в формате YYYY-MM-DD' }, { status: 400 })
+      }
+      newEnd = v
+    }
+    if (newEnd < newStart) {
+      return NextResponse.json({ error: 'Конец периода не может быть раньше начала' }, { status: 400 })
+    }
+    update.period_start = newStart
+    update.period_end = newEnd
+    periodChanged = true
+    // Отметка времени смены периода — чтобы пометить секции, чьи LLM-тексты
+    // сгенерированы ДО неё (generated_at < period_changed_at), как «могли устареть».
+    update.period_changed_at = new Date().toISOString()
+    // Перегенерируем заголовок под новый диапазон, если он не задан явно в этом же запросе.
+    if (!('title' in body)) {
+      update.title = formatPeriodTitle(new Date(newStart), new Date(newEnd), cur.data.period_type as PeriodType)
+    }
+  }
+
   if (Object.keys(update).length === 0) {
     return NextResponse.json({ error: 'Нечего обновлять' }, { status: 400 })
   }
@@ -510,7 +567,22 @@ export async function PATCH(
     .eq('id', id)
     .select('*')
     .single()
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) {
+    // unique_violation: 23505 (partial unique по period_type+period_start для week/month)
+    if (error.code === '23505') {
+      return NextResponse.json({ error: 'Отчёт с такой датой начала уже существует' }, { status: 409 })
+    }
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+
+  // Каскадно синхронизируем границы периода в секциях по объектам.
+  if (periodChanged) {
+    await supabaseAdmin
+      .from('object_reports')
+      .update({ period_start: newStart, period_end: newEnd })
+      .eq('report_id', id)
+  }
+
   return NextResponse.json({ report: data })
 }
 

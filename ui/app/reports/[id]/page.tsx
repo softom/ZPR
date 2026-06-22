@@ -145,6 +145,8 @@ type Section = {
     id: string; code: string; title: string;
     assignee_org: string | null; done_date: string; status: string
   }>
+  // Текст секции сгенерирован LLM ДО последней смены периода отчёта → мог устареть.
+  text_stale?: boolean
 }
 
 type LifecycleEventLite = {
@@ -185,7 +187,7 @@ const MONTH_FIELDS: FieldDef[] = [
 ]
 
 const WEEKLY_V3_FIELDS_UI: FieldDef[] = [
-  { key: 'project_movement',     title: 'Движение проекта за неделю',  hint: '1 абзац (2-4 предложения): что движется на объекте сейчас.' },
+  { key: 'project_movement',     title: 'Движение проекта за период',  hint: '1 абзац (2-4 предложения): что движется на объекте сейчас.' },
   { key: 'weekly_done_brief',    title: '✓ Выполнено / зафиксировано', hint: 'Markdown-список с маркером "* **DD.MM** — событие/факт".' },
   { key: 'weekly_topics_brief',  title: 'Обобщение тем собраний',      hint: 'Связный абзац курсивом — что обсуждалось на собраниях.' },
   { key: 'weekly_upcoming_brief', title: '🔜 Предстоит',                hint: 'Markdown-список задач со сроками и исполнителями.' },
@@ -247,6 +249,12 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [generatingId, setGeneratingId] = useState<string | null>(null)
   const [bulkRunning, setBulkRunning] = useState(false)
   const [finalizing, setFinalizing] = useState(false)
+
+  // Правка диапазона отчёта (свободные даты)
+  const [editingPeriod, setEditingPeriod] = useState(false)
+  const [periodStartDraft, setPeriodStartDraft] = useState('')
+  const [periodEndDraft, setPeriodEndDraft] = useState('')
+  const [savingPeriod, setSavingPeriod] = useState(false)
 
   // Общая сводка по проекту (reports.summary_md)
   const [summaryDraft, setSummaryDraft] = useState('')
@@ -408,6 +416,28 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
     await load()
   }
 
+  // Сохранение нового диапазона отчёта (свободные даты, без снапа).
+  // Статистика и срезы пересчитываются на лету при load(); LLM-тексты остаются.
+  async function savePeriod() {
+    if (!report) return
+    if (!periodStartDraft || !periodEndDraft) { alert('Укажите обе даты'); return }
+    if (periodEndDraft < periodStartDraft) { alert('Конец периода не может быть раньше начала'); return }
+    setSavingPeriod(true)
+    const res = await fetch(`/api/reports/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ period_start: periodStartDraft, period_end: periodEndDraft }),
+    })
+    setSavingPeriod(false)
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}))
+      alert(json.error ?? `HTTP ${res.status}`)
+      return
+    }
+    setEditingPeriod(false)
+    await load()
+  }
+
   // Сохранение llm_hint объекта: «приоритетный контекст от владельца» для LLM.
   // Не выводится в финальный отчёт. См. generateSection.ts → ownerHintBlock.
   const [llmHintDrafts, setLlmHintDrafts] = useState<Record<string, string>>({})
@@ -540,7 +570,9 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           {(() => {
             // Расширенный титул: «Отчёт еженедельный за период с 13 по 19 мая 2026 года»
             // + «По комплексу объектов: Золотые Пески России»
-            const kind = report.period_type === 'week' ? 'еженедельный' : 'ежемесячный'
+            // «еженедельный» опускаем для week — период может быть произвольным (расширяется
+            // вручную), нейтральное «Отчёт за период …» всегда корректно. month → «ежемесячный».
+            const kind = report.period_type === 'week' ? '' : 'ежемесячный'
             const phrase = formatPeriodPhrase(new Date(report.period_start), new Date(report.period_end), report.period_type)
             const scopeObjects = sections
               .map((s) => s.object ? { id: s.object_id, code: s.object.code, current_name: s.object.current_name } : null)
@@ -549,15 +581,65 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
             return (
               <>
                 <h1 className="text-2xl font-bold leading-tight">
-                  Отчёт {kind} за период {phrase}
+                  {kind ? `Отчёт ${kind} за период ${phrase}` : `Отчёт за период ${phrase}`}
                 </h1>
                 <p className="text-base text-gray-700 mt-1">{scopeLabel}</p>
               </>
             )
           })()}
-          <p className="text-xs text-gray-500 mt-1">
+          {/* Печатная версия строки периода — статичная */}
+          <p className="text-xs text-gray-500 mt-1 print-only">
             {formatDate(report.period_start)} — {formatDate(report.period_end)} · разделов: {sections.length}
           </p>
+          {/* Экранная версия — с возможностью править диапазон (свободные даты) */}
+          <div className="text-xs text-gray-500 mt-1 no-print">
+            {!editingPeriod ? (
+              <span>
+                {formatDate(report.period_start)} — {formatDate(report.period_end)} · разделов: {sections.length}
+                {!isFinal && (
+                  <button
+                    onClick={() => {
+                      setPeriodStartDraft(report.period_start)
+                      setPeriodEndDraft(report.period_end)
+                      setEditingPeriod(true)
+                    }}
+                    className="ml-2 text-blue-600 hover:underline"
+                  >
+                    ✎ изменить период
+                  </button>
+                )}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 flex-wrap">
+                <input
+                  type="date"
+                  value={periodStartDraft}
+                  onChange={(e) => setPeriodStartDraft(e.target.value)}
+                  className="border border-gray-300 rounded px-1 py-0.5"
+                />
+                <span>—</span>
+                <input
+                  type="date"
+                  value={periodEndDraft}
+                  onChange={(e) => setPeriodEndDraft(e.target.value)}
+                  className="border border-gray-300 rounded px-1 py-0.5"
+                />
+                <button
+                  onClick={savePeriod}
+                  disabled={savingPeriod}
+                  className="px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {savingPeriod ? '…' : 'Сохранить период'}
+                </button>
+                <button
+                  onClick={() => setEditingPeriod(false)}
+                  className="px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-50"
+                >
+                  Отмена
+                </button>
+              </span>
+            )}
+          </div>
           {isFinal && (
             <p className="text-sm text-green-700 mt-1 font-medium">
               ✅ Финализирован {formatDate(report.finalized_at)}
@@ -627,6 +709,29 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           )}
         </div>
       </div>
+
+      {/* Баннер: период менялся ПОСЛЕ генерации → тексты LLM могли устареть.
+          Цифры/срезы пересчитываются на лету, а сохранённый текст LLM — нет. */}
+      {!isFinal && (() => {
+        const staleCount = sections.filter((s) => s.text_stale).length
+        if (staleCount === 0) return null
+        return (
+          <div className="no-print mb-5 rounded border border-amber-300 bg-amber-50 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+            <div className="text-sm text-amber-900">
+              ⚠️ Период отчёта менялся после генерации текстов. Разделов с текстом,
+              созданным до смены периода: <strong>{staleCount}</strong>. Цифры и срезы
+              пересчитаны, но тексты LLM могли устареть — перегенерируйте (✨).
+            </div>
+            <button
+              onClick={generateAll}
+              disabled={bulkRunning}
+              className="px-3 py-1.5 bg-amber-600 text-white text-sm rounded hover:bg-amber-700 disabled:opacity-50 shrink-0"
+            >
+              {bulkRunning ? '⏳ Генерируется…' : '✨ Перегенерировать всё'}
+            </button>
+          </div>
+        )
+      })()}
 
       {/* Общая сводка по проекту (LLM на основе всех секций) */}
       <article className="bg-emerald-50/40 rounded shadow border border-emerald-200 p-5 mb-6">
@@ -792,6 +897,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                   )}
                   {s.object.contractor && (
                     <p className="text-xs text-gray-500 mt-0.5">Подрядчик: {s.object.contractor}</p>
+                  )}
+                  {!isFinal && s.text_stale && (
+                    <p className="text-xs text-amber-700 mt-1 no-print font-medium">
+                      ⚠️ текст создан до смены периода — мог устареть, перегенерируйте ✨
+                    </p>
                   )}
                 </div>
                 <div className="flex gap-2 no-print">

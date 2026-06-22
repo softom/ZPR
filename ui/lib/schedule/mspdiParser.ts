@@ -11,7 +11,9 @@ import {
   MSPDI_EXTENDED_FIELD_BY_ID,
   MSPDI_LAG_FORMAT,
   MSPDI_LINK_TYPE,
+  OWNED_TASK_TAGS,
   type ExtendedAttributeDef,
+  type MspdiPassthroughField,
   type MspdiPredecessor,
   type MspdiProject,
   type MspdiTask,
@@ -83,6 +85,131 @@ function lagToDays(linkLagRaw: unknown, lagFormatRaw: unknown): { lagDays: numbe
   }
 }
 
+// ─── Passthrough: извлечение упорядоченного набора не-owned полей ───────────
+
+/**
+ * Узел в формате fast-xml-parser preserveOrder:true.
+ * Каждый узел — объект вида { TagName: [...children] } (+ ':@' для атрибутов,
+ * который мы игнорируем) или { '#text': string } для текстового значения.
+ */
+type OrderedNode = Record<string, unknown>
+
+/** Имя тега узла в preserveOrder-формате (единственный ключ кроме ':@'). */
+function nodeTag(node: OrderedNode): string | null {
+  for (const k of Object.keys(node)) {
+    if (k === ':@') continue
+    return k
+  }
+  return null
+}
+
+/** Текстовое значение листового узла preserveOrder (массив с одним #text). */
+function nodeText(children: unknown): string | undefined {
+  if (!Array.isArray(children)) return undefined
+  for (const c of children) {
+    if (c && typeof c === 'object' && '#text' in (c as object)) {
+      const v = (c as Record<string, unknown>)['#text']
+      return v === undefined || v === null ? '' : String(v)
+    }
+  }
+  return undefined
+}
+
+/**
+ * Рекурсивно превращает preserveOrder-узел в MspdiPassthroughField.
+ * Лист (только #text) → {tag, value}. Иначе → {tag, children:[...]}.
+ */
+function nodeToField(node: OrderedNode): MspdiPassthroughField | null {
+  const tag = nodeTag(node)
+  if (!tag) return null
+  const children = node[tag]
+  if (!Array.isArray(children)) {
+    return { tag, value: '' }
+  }
+  // Лист: единственный потомок — текст.
+  const hasOnlyText = children.every(
+    (c) => c && typeof c === 'object' && '#text' in (c as object),
+  )
+  if (hasOnlyText) {
+    return { tag, value: nodeText(children) ?? '' }
+  }
+  // Составной узел: рекурсивно по детям, текстовые узлы между тегами пропускаем.
+  const sub: MspdiPassthroughField[] = []
+  for (const c of children as OrderedNode[]) {
+    if (c && typeof c === 'object' && '#text' in c) continue
+    const f = nodeToField(c)
+    if (f) sub.push(f)
+  }
+  return { tag, children: sub }
+}
+
+/**
+ * Собирает passthrough: не-owned дочерние узлы <Task> в исходном порядке.
+ * ExtendedAttribute owned (значения пишет ЗПР), НО ValueGUID нет в owned-модели —
+ * поэтому ExtendedAttribute-блоки сохраняем целиком в passthrough, чтобы при
+ * экспорте owned-рендер добрал ValueGUID. Остальные owned-теги исключаем.
+ */
+function extractPassthrough(taskChildren: OrderedNode[]): MspdiPassthroughField[] {
+  const out: MspdiPassthroughField[] = []
+  for (const node of taskChildren) {
+    if (node && typeof node === 'object' && '#text' in node) continue
+    const tag = nodeTag(node)
+    if (!tag) continue
+    // ExtendedAttribute — сохраняем целиком ради ValueGUID (см. выше).
+    if (OWNED_TASK_TAGS.has(tag) && tag !== 'ExtendedAttribute') continue
+    const f = nodeToField(node)
+    if (f) out.push(f)
+  }
+  return out
+}
+
+/**
+ * Второй проход парсинга с preserveOrder:true — строит карту mspdi_uid → passthrough.
+ * Отдельный проход выбран намеренно: основной парсер (объектная форма) удобен для
+ * чтения owned-полей, а preserveOrder нужен только для стабильного порядка тегов.
+ */
+function buildPassthroughMap(xml: string): Map<number, MspdiPassthroughField[]> {
+  const map = new Map<number, MspdiPassthroughField[]>()
+  const parser = new XMLParser({
+    ignoreAttributes: true,
+    removeNSPrefix: true,
+    parseTagValue: false,
+    parseAttributeValue: false,
+    trimValues: true,
+    preserveOrder: true,
+  })
+  const tree = parser.parse(xml) as OrderedNode[]
+
+  // Находим <Project> → <Tasks> → массив <Task>.
+  const findChildren = (nodes: OrderedNode[], tag: string): OrderedNode[] | null => {
+    for (const n of nodes) {
+      if (nodeTag(n) === tag && Array.isArray(n[tag])) return n[tag] as OrderedNode[]
+    }
+    return null
+  }
+  const projectChildren = findChildren(tree, 'Project')
+  if (!projectChildren) return map
+  const tasksChildren = findChildren(projectChildren, 'Tasks')
+  if (!tasksChildren) return map
+
+  for (const node of tasksChildren) {
+    if (nodeTag(node) !== 'Task') continue
+    const taskChildren = node['Task']
+    if (!Array.isArray(taskChildren)) continue
+    // UID узла
+    let uid: number | null = null
+    for (const c of taskChildren as OrderedNode[]) {
+      if (nodeTag(c) === 'UID') {
+        uid = asInt(nodeText(c['UID']))
+        break
+      }
+    }
+    if (uid === null) continue
+    map.set(uid, extractPassthrough(taskChildren as OrderedNode[]))
+  }
+  return map
+}
+
 // ─── Иерархия: вычисление parentUid из стека OutlineLevel ──────────────────
 
 function computeParentUids(tasks: MspdiTask[]): void {
@@ -143,6 +270,9 @@ export function parseMspdi(xml: string): MspdiProject {
   }
 
   // ─── Tasks ────────────────────────────────────────────────────────────────
+  // Второй проход (preserveOrder) для round-trip passthrough по UID.
+  const passthroughByUid = buildPassthroughMap(xml)
+
   const taskNodes = asArray((project.Tasks as Record<string, unknown> | undefined)?.Task)
   const tasks: MspdiTask[] = []
 
@@ -198,6 +328,7 @@ export function parseMspdi(xml: string): MspdiProject {
       notes: trimText(node.Notes),
       extendedAttributes: extValues,
       predecessors,
+      passthrough: passthroughByUid.get(uid) ?? [],
     })
   }
 

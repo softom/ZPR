@@ -74,6 +74,55 @@ export const MSPDI_EXTENDED_FIELD_BY_NAME: Record<string, string> = Object.fromE
   Object.entries(MSPDI_EXTENDED_FIELD_BY_ID).map(([id, name]) => [name, id]),
 )
 
+// ─── Round-trip passthrough ─────────────────────────────────────────────────
+
+/**
+ * Один сохранённый «как есть» узел <Task> из исходного MSPDI.
+ * Лист: {tag, value}. Составной (ExtendedAttribute/Baseline/PredecessorLink):
+ * {tag, children:[...]}. Порядок элементов массива = порядку тегов в оригинале.
+ */
+export interface MspdiPassthroughField {
+  tag: string
+  value?: string
+  children?: MspdiPassthroughField[]
+}
+
+/**
+ * Owned-теги <Task>: ЗПР пишет их из реляционных колонок БД, поэтому при импорте
+ * они НЕ попадают в passthrough (исключение хранится в одном месте — здесь —
+ * и используется и парсером, и сериализатором).
+ *
+ * DurationFormat/FreeformDurationFormat/Estimated формально owned, но если оригинал
+ * содержал отличающееся значение (summary имеет DurationFormat=21) — корректнее
+ * сохранять оригинал в passthrough. Поэтому их в OWNED_TASK_TAGS НЕТ: при наличии
+ * passthrough они берутся из него, для UI-задач — из шаблона.
+ */
+export const OWNED_TASK_TAGS: ReadonlySet<string> = new Set<string>([
+  'UID',
+  'ID',
+  'Name',
+  'OutlineLevel',
+  'OutlineNumber',
+  'WBS',
+  'Summary',
+  'Milestone',
+  'Active',
+  'Manual',
+  'Start',
+  'Finish',
+  'Duration',
+  'ManualStart',
+  'ManualFinish',
+  'ManualDuration',
+  'ConstraintType',
+  'ConstraintDate',
+  'PercentComplete',
+  'Notes',
+  'ExtendedAttribute',
+  'PredecessorLink',
+  'IsNull',
+])
+
 // ─── Типы парсинга ──────────────────────────────────────────────────────────
 
 export interface ExtendedAttributeDef {
@@ -109,6 +158,11 @@ export interface MspdiTask {
   /** Map FieldName → значение, например {'Text1': '102_ГОСТИНИЦА_800'}. */
   extendedAttributes: Record<string, string>
   predecessors: MspdiPredecessor[]
+  /**
+   * Упорядоченный массив не-owned полей <Task> из оригинала (для round-trip).
+   * Заполняется ВСЕГДА при импорте из XML. Для UI-задач (не из XML) — null.
+   */
+  passthrough: MspdiPassthroughField[]
 }
 
 export interface CalendarSettings {

@@ -30,6 +30,8 @@ export async function PATCH(
     // week/month:
     'project_movement', 'achievements', 'achievements_list',
     'next_period_tasks', 'next_period_tasks_list', 'risks',
+    // week v3:
+    'weekly_done_brief', 'weekly_topics_brief', 'weekly_upcoming_brief',
     // control:
     'narrative', 'contract_summary', 'decisions',
   ]

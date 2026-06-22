@@ -328,7 +328,7 @@ function renderWeeklyV3Markdown(report: ReportRow, sections: SectionRow[]): stri
     .filter((x): x is { id: string; code: string; current_name: string } => Boolean(x))
   const scopeLabel = formatScopeLabel(scopeObjects)
 
-  lines.push(`# Отчёт еженедельный за период ${periodPhrase}`, '')
+  lines.push(`# Отчёт за период ${periodPhrase}`, '')
   lines.push(`## ${scopeLabel}`, '')
   if (report.title && report.title.trim().length > 0) lines.push(`*${report.title}*`, '')
   lines.push('---', '')
@@ -367,15 +367,15 @@ function renderWeeklyV3Markdown(report: ReportRow, sections: SectionRow[]): stri
       lines.push('')
     }
 
-    // Движение проекта за неделю
-    lines.push(`### Движение проекта за неделю`, '')
+    // Движение проекта за период
+    lines.push(`### Движение проекта за период`, '')
     lines.push(s.project_movement?.trim() || '*— не заполнено —*', '')
 
     // Ключевые события и задачи
     lines.push(`### Ключевые события и задачи`, '')
 
     if (s.weekly_done_brief && s.weekly_done_brief.trim().length > 0) {
-      lines.push(`**✓ Выполнено / зафиксировано за неделю:**`, '')
+      lines.push(`**✓ Выполнено / зафиксировано за период:**`, '')
       lines.push(s.weekly_done_brief.trim(), '')
     }
 

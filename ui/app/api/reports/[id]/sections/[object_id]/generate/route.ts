@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase-admin'
 import { buildContext } from '@/lib/reports/buildContext'
 import { buildControlContext } from '@/lib/reports/buildControlContext'
-import { generateSections, REPORT_FIELDS, type ReportField } from '@/lib/reports/generateSection'
+import { generateSections, REPORT_FIELDS, WEEKLY_V3_FIELDS, type ReportField } from '@/lib/reports/generateSection'
 import { generateControlSections, CONTROL_FIELDS, type ControlField } from '@/lib/reports/generateControlSection'
 import { buildShortContext } from '@/lib/reports/buildShortContext'
 import { generateShortSections, SHORT_FIELDS, type ShortField } from '@/lib/reports/generateShortSection'
@@ -33,12 +33,14 @@ export async function POST(
   const periodStart = new Date(r.data.period_start)
   const periodEndDate = new Date(r.data.period_end)
 
-  // Парсим fields (валидный набор зависит от типа отчёта)
+  // Парсим fields (валидный набор зависит от типа отчёта).
+  // week → поля Weekly v3 (project_movement + 3 weekly_*); month → legacy 6 полей.
+  const weekOrMonthFields = (periodType === 'week' ? WEEKLY_V3_FIELDS : REPORT_FIELDS) as readonly string[]
   const allowedFields = periodType === 'control'
     ? (CONTROL_FIELDS as readonly string[])
     : periodType === 'short'
     ? (SHORT_FIELDS as readonly string[])
-    : (REPORT_FIELDS as readonly string[])
+    : weekOrMonthFields
 
   let requestedFields: string[] | undefined
   try {
@@ -172,7 +174,7 @@ export async function POST(
 
   const update: Record<string, string | null> = {}
   let nonEmptyCount = 0
-  for (const f of (requestedFields ?? REPORT_FIELDS) as ReportField[]) {
+  for (const f of (requestedFields ?? weekOrMonthFields) as ReportField[]) {
     if (!(f in sections)) continue
     const v = sections[f] ?? ''
     if (v.trim().length === 0) continue

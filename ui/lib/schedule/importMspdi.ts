@@ -315,6 +315,8 @@ async function runImport(
       task_mode: t.manual ? 'manual' as const : 'auto' as const,
       mspdi_notes: t.notes,
       mspdi_duration: t.durationText,
+      // Round-trip: упорядоченный набор не-owned полей <Task> (как есть, без сортировки/дедупа).
+      mspdi_passthrough: t.passthrough.length > 0 ? t.passthrough : null,
       last_import_id: importId,
     }
 
