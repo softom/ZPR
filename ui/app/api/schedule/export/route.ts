@@ -16,7 +16,8 @@ export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url)
-  const objectField = url.searchParams.get('objectField') ?? 'Text1'
+  // НЕ ставим 'Text1' по умолчанию — иначе перебивает object_field версии (Текст15).
+  const objectField = url.searchParams.get('objectField') ?? undefined
   const projectName = url.searchParams.get('projectName') ?? 'ZPR_Schedule'
   const versionId = url.searchParams.get('versionId') ?? null
 

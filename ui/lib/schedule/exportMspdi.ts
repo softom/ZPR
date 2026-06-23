@@ -189,11 +189,20 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
   //    .in() с 400+ UUID превышает лимит длины URL у PostgREST (тихий пустой ответ),
   //    поэтому селектим всё и фильтруем в JS — у нас связей всего сотни/тысячи.
   const idSet = new Set(rows.map(r => r.id))
-  const { data: preds, error: predsErr } = await supabaseAdmin
-    .from('calendar_predecessors')
-    .select('calendar_id, predecessor_id, link_type, lag, lag_type')
-  if (predsErr) console.warn(`calendar_predecessors select: ${predsErr.message}`)
-  const predRows = ((preds ?? []) as PredecessorRow[])
+  // PostgREST режет ответ жёстким cap (обычно 1000). Грузим связи постранично,
+  // иначе связи последних версий (после 1000-й строки таблицы) теряются.
+  const allPreds: PredecessorRow[] = []
+  for (let from = 0; ; from += 1000) {
+    const { data: page, error: pErr } = await supabaseAdmin
+      .from('calendar_predecessors')
+      .select('calendar_id, predecessor_id, link_type, lag, lag_type')
+      .range(from, from + 999)
+    if (pErr) { console.warn(`calendar_predecessors select: ${pErr.message}`); break }
+    if (!page || page.length === 0) break
+    allPreds.push(...(page as PredecessorRow[]))
+    if (page.length < 1000) break
+  }
+  const predRows = allPreds
     .filter(p => idSet.has(p.calendar_id) && idSet.has(p.predecessor_id))
 
   // 4. Имена объектов для Text1
@@ -245,6 +254,21 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
   // унифицированный язык графика. Round-trip обеспечивается тем, что мы
   // ниже UPSERT-им маппинги «код объекта → тот же объект», так что повторный
   // импорт того же файла найдёт привязку.
+  // Флаги по объектам (Флаг1..Флаг8): значение хранится в задаче → едет с файлом.
+  // Пользователь создаёт фильтр «Флаг_N = Да» один раз. Флаг_i = 1 для задач
+  // объекта_i ИЛИ общих «ВСЕ ОБЪЕКТЫ» (как в исходной логике фильтров).
+  const FLAG_SERVICE = new Set(['ВСЕ ОБЪЕКТЫ', 'Градостроительная документация', 'Работы ДонАвтоДор', 'Работы по межеванию и кадастрированию'])
+  const FLAG_FIELD_BASE = 188743752  // FieldID Флаг1 (далее +1: Флаг2..Флаг8)
+  const flagObjects = Array.from(new Set(rows.map(r => r.schedule_raw_text).filter((x): x is string => !!x && !FLAG_SERVICE.has(x)))).sort()
+  // MS Project молча отклоняет alias со скобками/слешем → поле остаётся без имени.
+  // Чистим: убираем «()», слеш → дефис, схлопываем пробелы.
+  const cleanAlias = (s: string) => s.replace(/[()]/g, '').replace(/\//g, '-').replace(/\s+/g, ' ').trim()
+  const flagDefs = flagObjects.map((obj, i) => ({
+    fieldName: `Флаг${i + 1}`,
+    alias: cleanAlias(obj),
+    fieldId: String(FLAG_FIELD_BASE + i),
+  }))
+
   // outline_level=0 — пустые строки-разделители MS Project, не экспортируем (ломают иерархию XML)
   const serTasks: SerializeTask[] = rows.filter(r => r.outline_level !== 0 && r.outline_level !== null).map(r => {
     const codes = r.object_ids.map(id => objectMap.get(id)?.code).filter(Boolean) as string[]
@@ -271,6 +295,13 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
 
     const ext: Record<string, string> = {}
     if (objectText && objectField !== 'Notes') ext[objectField] = objectText
+    // Проставляем флаги: объект задачи + общие «ВСЕ ОБЪЕКТЫ» попадают во все флаги
+    const rt = r.schedule_raw_text
+    if (rt) {
+      flagObjects.forEach((obj, i) => {
+        if (rt === obj || rt === 'ВСЕ ОБЪЕКТЫ') ext[`Флаг${i + 1}`] = '1'
+      })
+    }
 
     const notes = (() => {
       if (objectField === 'Notes' && objectText) return objectText
@@ -288,7 +319,12 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
       // Веха — по типу записи, НЕ по совпадению дат: 1-дневная задача тоже
       // имеет date_start==date_end, но это не milestone (у неё своя длительность).
       isMilestone: r.entry_type === 'schedule_milestone',
-      manual: r.task_mode === 'manual',
+      // Задачи после Форэскиза (разделы 5+: Концепция, Проект, Экспертиза, РНС) —
+      // AUTO, чтобы Project пересчитывал по предшественникам (пользователь играет
+      // с графиком). Форэскиз/ИРД/кадастр (разделы 1–4) — как в БД (manual, договорные).
+      manual: (parseInt((r.outline_number ?? '0').split('.')[0], 10) >= 5)
+        ? false
+        : (r.task_mode === 'manual'),
       start: r.date_start,
       finish: r.date_end,
       duration: r.mspdi_duration,
@@ -327,6 +363,10 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
       fieldId: objectFieldId ?? undefined,
     })
   }
+  // Декларации флагов по объектам (Флаг1..Флаг8) — alias = название объекта
+  for (const fd of flagDefs) {
+    if (!extDefs.find(d => d.fieldName === fd.fieldName)) extDefs.push(fd)
+  }
 
   const cal = importMeta?.project_calendar_settings ?? null
   const serializeOpts: SerializeOptions = {
@@ -342,6 +382,9 @@ export async function exportMspdiXml(opts: ExportOptions = {}): Promise<string> 
       defaultFinishTime: cal.default_finish_time,
     } : undefined,
     extendedAttributes: extDefs,
+    // Фильтры в XML НЕ генерируем: MS Project хранит их в Global.mpt (профиль ПК),
+    // а не в файле — из .xml они не подхватываются. Разбивка по объектам делается
+    // через поле Текст15 (группировка/автофильтр), которое едет с файлом.
   }
 
   return serializeMspdi(serTasks, serializeOpts)

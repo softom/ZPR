@@ -500,9 +500,12 @@ export function serializeMspdi(tasks: SerializeTask[], opts: SerializeOptions = 
     // Только по isMilestone (тип записи) — 1-дневная задача с одной датой вехой НЕ является.
     const finishMspdiT = dateToMspdi(t.finish, t.isMilestone ? 'start' : 'finish')
     const durationStr = computeDuration(t)
-    // ConstraintType: для листовых задач с датой — SNET(4) (держит дату от уезда);
-    // для summary не пишем (Project считает по детям).
-    const constraintType: number | null = (!t.isSummary && startMspdiT) ? 4 : null
+    // ConstraintType:
+    //  - manual-задача (Форэскиз, договорные даты) → SNET(4), держит дату от уезда;
+    //  - auto-задача (Концепция и далее) → без constraint (ASAP), чтобы Project
+    //    пересчитывал по предшественникам — пользователь играет с графиком;
+    //  - summary → не пишем (Project считает по детям).
+    const constraintType: number | null = (!t.isSummary && startMspdiT && t.manual) ? 4 : null
 
     // Обратная совместимость: passthrough === undefined → старая генерация.
     const hasPassthroughField = t.passthrough !== undefined

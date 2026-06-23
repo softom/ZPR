@@ -20,19 +20,18 @@ export async function GET() {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  // Кол-во записей calendar_entries per version
+  // Кол-во записей calendar_entries per version.
+  // Точный count по каждой версии (head:true — строки не грузятся), иначе общий
+  // .in()-запрос режется лимитом PostgREST 1000 и у последних версий count=0.
   const ids = (data ?? []).map(r => r.id)
-  let countMap: Record<string, number> = {}
-  if (ids.length > 0) {
-    const { data: counts } = await supabaseAdmin
+  const countMap: Record<string, number> = {}
+  await Promise.all(ids.map(async (id) => {
+    const { count } = await supabaseAdmin
       .from('calendar_entries')
-      .select('schedule_version_id')
-      .in('schedule_version_id', ids)
-    for (const row of counts ?? []) {
-      const vid = row.schedule_version_id as string
-      countMap[vid] = (countMap[vid] ?? 0) + 1
-    }
-  }
+      .select('*', { count: 'exact', head: true })
+      .eq('schedule_version_id', id)
+    countMap[id] = count ?? 0
+  }))
 
   const versions = (data ?? []).map(r => ({
     ...r,
